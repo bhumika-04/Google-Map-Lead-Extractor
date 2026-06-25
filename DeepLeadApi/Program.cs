@@ -188,6 +188,371 @@ app.MapPost("/api/leads/save-batch", async (LeadBatchPayload payload) =>
     }
 });
 
+// ─── Research result save ─────────────────────────────────────────────────────
+// Saves the complete AI research result to MSSQL — all fields including arrays.
+// Called by the extension after research completes so full data survives reinstall.
+
+app.MapPost("/api/research/save", async (ResearchSavePayload payload) =>
+{
+    try
+    {
+        using var db = new SqlConnection(connStr);
+
+        // Find the company by Google Maps URL or name+city
+        var companyId = await db.ExecuteScalarAsync<Guid?>(
+            "SELECT id FROM companies WHERE google_maps_url = @url OR (name = @name AND city = @city)",
+            new { url = payload.GoogleMapsUrl, name = payload.CompanyName, city = payload.City });
+
+        if (!companyId.HasValue) return Results.NotFound(new { ok = false, error = "Company not found in DB" });
+
+        await db.ExecuteAsync("""
+            MERGE company_enrichments AS target
+            USING (SELECT @companyId AS company_id) AS src ON target.company_id = src.company_id
+            WHEN MATCHED THEN UPDATE SET
+                official_website       = @website,
+                email                  = @email,
+                alternate_phone        = @alternatePhone,
+                whatsapp               = @whatsapp,
+                linkedin_url           = @linkedIn,
+                facebook_url           = @facebook,
+                instagram_url          = @instagram,
+                youtube_url            = @youtube,
+                twitter_url            = @twitter,
+                owner_name             = @decisionMaker,
+                owner_linkedin         = @decisionMakerLinkedIn,
+                industry               = @industry,
+                tagline                = @tagline,
+                description            = @summary,
+                products_services      = @services,
+                business_type          = @companyType,
+                supplier_type          = @supplierType,
+                team_size              = @employeeCount,
+                established_year       = @yearFounded,
+                annual_turnover        = @annualTurnover,
+                headquarters           = @headquarters,
+                team_members_json      = @teamMembersJson,
+                certifications_json    = @certificationsJson,
+                major_clients_json     = @majorClientsJson,
+                expansion_signals_json = @expansionSignalsJson,
+                current_software_json  = @currentSoftwareJson,
+                export_markets_json    = @exportMarketsJson,
+                pain_points_json       = @painPointsJson,
+                services_json          = @servicesJson,
+                overall_confidence     = @confidence,
+                lead_score             = @leadScore,
+                full_result_json       = @fullResultJson,
+                enriched_at            = GETDATE(),
+                updated_at             = GETDATE()
+            WHEN NOT MATCHED THEN INSERT (
+                id, company_id, official_website, email, alternate_phone, whatsapp,
+                linkedin_url, facebook_url, instagram_url, youtube_url, twitter_url,
+                owner_name, owner_linkedin, industry, tagline, description, products_services,
+                business_type, supplier_type, team_size, established_year, annual_turnover,
+                headquarters, team_members_json, certifications_json, major_clients_json,
+                expansion_signals_json, current_software_json, export_markets_json,
+                pain_points_json, services_json, overall_confidence, lead_score,
+                full_result_json, enriched_at, updated_at
+            ) VALUES (
+                NEWID(), @companyId, @website, @email, @alternatePhone, @whatsapp,
+                @linkedIn, @facebook, @instagram, @youtube, @twitter,
+                @decisionMaker, @decisionMakerLinkedIn, @industry, @tagline, @summary, @services,
+                @companyType, @supplierType, @employeeCount, @yearFounded, @annualTurnover,
+                @headquarters, @teamMembersJson, @certificationsJson, @majorClientsJson,
+                @expansionSignalsJson, @currentSoftwareJson, @exportMarketsJson,
+                @painPointsJson, @servicesJson, @confidence, @leadScore,
+                @fullResultJson, GETDATE(), GETDATE()
+            );
+
+            UPDATE companies SET enrichment_status='enriched', updated_at=GETDATE() WHERE id=@companyId;
+            """, new
+        {
+            companyId          = companyId.Value,
+            website            = payload.Website,
+            email              = payload.Email,
+            alternatePhone     = payload.AlternatePhone,
+            whatsapp           = payload.Whatsapp,
+            linkedIn           = payload.LinkedIn,
+            facebook           = payload.Facebook,
+            instagram          = payload.Instagram,
+            youtube            = payload.Youtube,
+            twitter            = payload.Twitter,
+            decisionMaker      = payload.DecisionMaker,
+            decisionMakerLinkedIn = payload.DecisionMakerLinkedIn,
+            industry           = payload.Industry,
+            tagline            = payload.Tagline,
+            summary            = payload.Summary,
+            services           = payload.Services,
+            companyType        = payload.CompanyType,
+            supplierType       = payload.SupplierType,
+            employeeCount      = payload.EmployeeCount,
+            yearFounded        = payload.YearFounded?.ToString(),
+            annualTurnover     = payload.AnnualTurnover,
+            headquarters       = payload.Headquarters,
+            teamMembersJson    = payload.TeamMembersJson,
+            certificationsJson = payload.CertificationsJson,
+            majorClientsJson   = payload.MajorClientsJson,
+            expansionSignalsJson = payload.ExpansionSignalsJson,
+            currentSoftwareJson = payload.CurrentSoftwareJson,
+            exportMarketsJson  = payload.ExportMarketsJson,
+            painPointsJson     = payload.PainPointsJson,
+            servicesJson       = payload.ServicesJson,
+            confidence         = payload.Confidence ?? 0.5m,
+            leadScore          = (int)Math.Round((double)(payload.Confidence ?? 0.5m) * 100),
+            fullResultJson     = payload.FullResultJson,
+        });
+
+        // Upsert all team members as individual contacts
+        if (!string.IsNullOrWhiteSpace(payload.TeamMembersJson))
+        {
+            var members = System.Text.Json.JsonSerializer.Deserialize<List<TeamMemberDto>>(payload.TeamMembersJson);
+            if (members != null)
+            {
+                foreach (var m in members)
+                {
+                    var exists = await db.ExecuteScalarAsync<int>(
+                        "SELECT COUNT(1) FROM company_contacts WHERE company_id=@cid AND full_name=@name",
+                        new { cid = companyId.Value, name = m.Name });
+                    if (exists == 0)
+                        await db.ExecuteAsync("""
+                            INSERT INTO company_contacts (id, company_id, full_name, role, source_type, confidence, discovered_at)
+                            VALUES (NEWID(), @cid, @name, @role, 'ai_research', 0.8, GETDATE())
+                            """, new { cid = companyId.Value, name = m.Name, role = m.Role });
+                }
+            }
+        }
+
+        return Results.Ok(new { ok = true, companyId });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message, title: "Research save failed");
+    }
+});
+
+// ─── Deep research save ───────────────────────────────────────────────────────
+
+app.MapPost("/api/deep-research/save", async (DeepResearchSavePayload payload) =>
+{
+    try
+    {
+        using var db = new SqlConnection(connStr);
+
+        var companyId = await db.ExecuteScalarAsync<Guid?>(
+            "SELECT id FROM companies WHERE google_maps_url = @url OR (name = @name AND city = @city)",
+            new { url = payload.GoogleMapsUrl, name = payload.CompanyName, city = payload.City });
+
+        if (!companyId.HasValue) return Results.NotFound(new { ok = false, error = "Company not found" });
+
+        await db.ExecuteAsync("""
+            MERGE company_deep_research AS target
+            USING (SELECT @companyId AS company_id) AS src ON target.company_id = src.company_id
+            WHEN MATCHED THEN UPDATE SET
+                recommended_pitch       = @pitch,
+                pitch_template          = @template,
+                people_activity_json    = @peopleJson,
+                company_signals_json    = @companySignalsJson,
+                intent_signals_json     = @intentSignalsJson,
+                full_deep_research_json = @fullJson,
+                researched_at           = GETDATE(),
+                updated_at              = GETDATE()
+            WHEN NOT MATCHED THEN INSERT (
+                id, company_id, recommended_pitch, pitch_template,
+                people_activity_json, company_signals_json, intent_signals_json,
+                full_deep_research_json, researched_at
+            ) VALUES (
+                NEWID(), @companyId, @pitch, @template,
+                @peopleJson, @companySignalsJson, @intentSignalsJson,
+                @fullJson, GETDATE()
+            );
+            """, new
+        {
+            companyId          = companyId.Value,
+            pitch              = payload.RecommendedPitch,
+            template           = payload.PitchTemplate,
+            peopleJson         = payload.PeopleActivityJson,
+            companySignalsJson = payload.CompanySignalsJson,
+            intentSignalsJson  = payload.IntentSignalsJson,
+            fullJson           = payload.FullDeepResearchJson,
+        });
+
+        return Results.Ok(new { ok = true, companyId });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message, title: "Deep research save failed");
+    }
+});
+
+// ─── Outreach endpoints ───────────────────────────────────────────────────────
+
+// Log a message sent on any channel
+app.MapPost("/api/outreach/send", async (OutreachSendPayload payload) =>
+{
+    try
+    {
+        using var db = new SqlConnection(connStr);
+
+        // Get or create conversation for this company+channel
+        var convId = await db.ExecuteScalarAsync<Guid?>(
+            "SELECT id FROM outreach_conversations WHERE company_id=@cid AND channel=@channel",
+            new { cid = payload.CompanyId, channel = payload.Channel });
+
+        if (!convId.HasValue)
+        {
+            convId = Guid.NewGuid();
+            await db.ExecuteAsync("""
+                INSERT INTO outreach_conversations
+                    (id, company_id, contact_id, channel, contact_name, stage, last_activity_at)
+                VALUES
+                    (@id, @cid, @contactId, @channel, @contactName, 'contacted', GETDATE())
+                """, new
+            {
+                id          = convId.Value,
+                cid         = payload.CompanyId,
+                contactId   = payload.ContactId,
+                channel     = payload.Channel,
+                contactName = payload.ContactName,
+            });
+        }
+        else
+        {
+            await db.ExecuteAsync(
+                "UPDATE outreach_conversations SET stage='contacted', last_activity_at=GETDATE(), updated_at=GETDATE() WHERE id=@id",
+                new { id = convId.Value });
+        }
+
+        // Log the message
+        await db.ExecuteAsync("""
+            INSERT INTO conversation_messages (id, conversation_id, direction, content, channel, sent_at)
+            VALUES (NEWID(), @convId, 'outbound', @content, @channel, GETDATE())
+            """, new { convId = convId.Value, content = payload.MessageText, channel = payload.Channel });
+
+        // Update company outreach status
+        await db.ExecuteAsync(
+            "UPDATE companies SET outreach_status='contacted', updated_at=GETDATE() WHERE id=@id",
+            new { id = payload.CompanyId });
+
+        return Results.Ok(new { ok = true, conversationId = convId });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message, title: "Outreach send failed");
+    }
+});
+
+// Log a reply received from the prospect
+app.MapPost("/api/outreach/reply", async (OutreachReplyPayload payload) =>
+{
+    try
+    {
+        using var db = new SqlConnection(connStr);
+
+        await db.ExecuteAsync("""
+            INSERT INTO conversation_messages (id, conversation_id, direction, content, channel, sent_at)
+            VALUES (NEWID(), @convId, 'inbound', @content, @channel, GETDATE());
+
+            UPDATE outreach_conversations
+            SET stage='replied', last_activity_at=GETDATE(), updated_at=GETDATE()
+            WHERE id=@convId;
+
+            UPDATE companies
+            SET outreach_status='replied', updated_at=GETDATE()
+            WHERE id=(SELECT company_id FROM outreach_conversations WHERE id=@convId);
+            """, new { convId = payload.ConversationId, content = payload.ReplyText, channel = payload.Channel });
+
+        return Results.Ok(new { ok = true });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message, title: "Reply log failed");
+    }
+});
+
+// Update conversation stage (e.g. replied → nurturing → meeting_scheduled → won)
+app.MapPost("/api/outreach/stage", async (OutreachStagePayload payload) =>
+{
+    try
+    {
+        using var db = new SqlConnection(connStr);
+        await db.ExecuteAsync("""
+            UPDATE outreach_conversations
+            SET stage=@stage, notes=COALESCE(@notes, notes),
+                next_follow_up_at=@followUp,
+                last_activity_at=GETDATE(), updated_at=GETDATE()
+            WHERE id=@convId;
+
+            UPDATE companies
+            SET outreach_status=@stage, updated_at=GETDATE()
+            WHERE id=(SELECT company_id FROM outreach_conversations WHERE id=@convId);
+            """, new
+        {
+            convId   = payload.ConversationId,
+            stage    = payload.Stage,
+            notes    = payload.Notes,
+            followUp = payload.NextFollowUpAt,
+        });
+        return Results.Ok(new { ok = true });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message, title: "Stage update failed");
+    }
+});
+
+// Get full conversation history for a company
+app.MapGet("/api/outreach/{companyId}", async (Guid companyId) =>
+{
+    try
+    {
+        using var db = new SqlConnection(connStr);
+        var conversations = await db.QueryAsync<dynamic>("""
+            SELECT
+                oc.id, oc.channel, oc.contact_name AS contactName, oc.stage,
+                oc.last_activity_at AS lastActivityAt, oc.next_follow_up_at AS nextFollowUpAt,
+                oc.notes
+            FROM outreach_conversations oc
+            WHERE oc.company_id = @companyId
+            ORDER BY oc.last_activity_at DESC
+            """, new { companyId });
+
+        var messages = await db.QueryAsync<dynamic>("""
+            SELECT cm.id, cm.conversation_id AS conversationId, cm.direction,
+                   cm.content, cm.channel, cm.sent_at AS sentAt
+            FROM conversation_messages cm
+            JOIN outreach_conversations oc ON cm.conversation_id = oc.id
+            WHERE oc.company_id = @companyId
+            ORDER BY cm.sent_at ASC
+            """, new { companyId });
+
+        return Results.Ok(new { ok = true, conversations, messages });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message, title: "Outreach fetch failed");
+    }
+});
+
+// ─── Restore endpoint (updated to include research + deep research) ────────────
+
+app.MapGet("/api/restore/full/{companyId}", async (Guid companyId) =>
+{
+    try
+    {
+        using var db = new SqlConnection(connStr);
+        var enrichment = await db.QueryFirstOrDefaultAsync<dynamic>(
+            "SELECT full_result_json AS researchJson FROM company_enrichments WHERE company_id=@id",
+            new { id = companyId });
+        var deepResearch = await db.QueryFirstOrDefaultAsync<dynamic>(
+            "SELECT full_deep_research_json AS deepResearchJson FROM company_deep_research WHERE company_id=@id",
+            new { id = companyId });
+        return Results.Ok(new { ok = true, enrichment, deepResearch });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message, title: "Full restore failed");
+    }
+});
+
 // ─── Extension full-backup endpoints ─────────────────────────────────────────
 // Saves/restores the complete IndexedDB dump so reinstalling the extension
 // doesn't lose any data. The backup lives as a JSON file next to the API.
@@ -430,3 +795,45 @@ public record LeadBatchItem(
     string? Address, string? Phone, string? Website, string? GoogleMapsUrl,
     decimal? Rating, int? ReviewCount, string? Category
 );
+
+public record ResearchSavePayload(
+    string CompanyName, string City, string? GoogleMapsUrl,
+    // Contact
+    string? Website, string? Email, string? AlternatePhone, string? Whatsapp,
+    // Social
+    string? LinkedIn, string? Facebook, string? Instagram, string? Youtube, string? Twitter,
+    // Decision maker
+    string? DecisionMaker, string? DecisionMakerLinkedIn,
+    // Business
+    string? Industry, string? Tagline, string? Summary, string? Services,
+    string? CompanyType, string? SupplierType, string? EmployeeCount,
+    int? YearFounded, string? AnnualTurnover, string? Headquarters,
+    // JSON arrays
+    string? TeamMembersJson, string? CertificationsJson, string? MajorClientsJson,
+    string? ExpansionSignalsJson, string? CurrentSoftwareJson, string? ExportMarketsJson,
+    string? PainPointsJson, string? ServicesJson,
+    // Score + full blob
+    decimal? Confidence, string? FullResultJson
+);
+
+public record DeepResearchSavePayload(
+    string CompanyName, string City, string? GoogleMapsUrl,
+    string? RecommendedPitch, string? PitchTemplate,
+    string? PeopleActivityJson, string? CompanySignalsJson, string? IntentSignalsJson,
+    string? FullDeepResearchJson
+);
+
+public record OutreachSendPayload(
+    Guid CompanyId, string Channel, string? ContactName,
+    Guid? ContactId, string MessageText
+);
+
+public record OutreachReplyPayload(
+    Guid ConversationId, string Channel, string ReplyText
+);
+
+public record OutreachStagePayload(
+    Guid ConversationId, string Stage, string? Notes, DateTime? NextFollowUpAt
+);
+
+public record TeamMemberDto(string Name, string Role);
