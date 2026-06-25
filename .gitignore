@@ -1,0 +1,31 @@
+# ── Node / Extension ──────────────────────────────────────────────────────────
+node_modules/
+dist/
+.cache/
+*.tsbuildinfo
+
+# ── .NET / API ────────────────────────────────────────────────────────────────
+DeepLeadApi/bin/
+DeepLeadApi/obj/
+DeepLeadApi/appsettings.json
+DeepLeadApi/appsettings.Development.json
+DeepLeadApi/extension-backup.json
+
+# ── Secrets & env ─────────────────────────────────────────────────────────────
+.env
+.env.*
+*.env
+*.pem
+*.key
+
+# ── OS / IDE ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.idea/
+*.suo
+*.user
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/

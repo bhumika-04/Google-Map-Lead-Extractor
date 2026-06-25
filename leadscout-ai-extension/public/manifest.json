@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "LeadScout AI",
+  "version": "1.0.0",
+  "description": "Automated business lead discovery from Google Maps. Search, capture, and manage leads from our AI-powered dashboard.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    },
+    "default_title": "LeadScout AI"
+  },
+  "background": {
+    "service_worker": "background/serviceWorker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.google.com/maps/*",
+        "https://maps.google.com/*"
+      ],
+      "js": ["content/mapsContent.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://www.google.com/maps/*",
+    "https://maps.google.com/*",
+    "https://api.anthropic.com/*",
+    "https://api.openai.com/*",
+    "http://localhost:5150/*",
+    "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["dashboard/dashboard.html", "icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
