@@ -44,7 +44,8 @@ CREATE TABLE companies (
     updated_at        DATETIME      DEFAULT GETDATE()
 );
 ELSE BEGIN
-    -- Add outreach_status if this is an existing table
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('companies') AND name='validation_status')
+        ALTER TABLE companies ADD validation_status NVARCHAR(50);
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('companies') AND name='outreach_status')
         ALTER TABLE companies ADD outreach_status NVARCHAR(50) DEFAULT 'not_contacted';
 END
@@ -238,8 +239,12 @@ GO
 
 -- ── Useful views ──────────────────────────────────────────────
 
+-- Drop and recreate so any prior partial-create is cleared
+IF OBJECT_ID('vw_lead_pipeline', 'V') IS NOT NULL DROP VIEW vw_lead_pipeline;
+GO
+
 -- Full pipeline view: one row per lead with all enrichment + outreach stage
-CREATE OR ALTER VIEW vw_lead_pipeline AS
+CREATE VIEW vw_lead_pipeline AS
 SELECT
     c.id                    AS company_id,
     c.name                  AS company_name,
