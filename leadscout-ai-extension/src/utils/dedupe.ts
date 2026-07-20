@@ -5,7 +5,7 @@ export interface DedupeKey {
   byMapsUrl?: string
   byPhone?: string
   byNameAddress?: string
-  byNameCityKeyword?: string
+  byNameCity?: string       // name + city — keyword-agnostic, the canonical unique key
 }
 
 export function buildDedupeKeys(lead: Omit<Lead, 'id'>): DedupeKey {
@@ -20,8 +20,8 @@ export function buildDedupeKeys(lead: Omit<Lead, 'id'>): DedupeKey {
   if (lead.normalizedName && lead.address) {
     keys.byNameAddress = `${lead.normalizedName}|${normalizeAddress(lead.address)}`
   }
-  if (lead.normalizedName) {
-    keys.byNameCityKeyword = `${lead.normalizedName}|${lead.city.toLowerCase()}|${lead.keyword.toLowerCase()}`
+  if (lead.normalizedName && lead.city) {
+    keys.byNameCity = `${lead.normalizedName}|${lead.city.toLowerCase()}`
   }
 
   return keys
@@ -45,7 +45,7 @@ export function isDuplicate(
     if (keys.byNameAddress && existingKeys.byNameAddress && keys.byNameAddress === existingKeys.byNameAddress) {
       return lead
     }
-    if (keys.byNameCityKeyword && existingKeys.byNameCityKeyword && keys.byNameCityKeyword === existingKeys.byNameCityKeyword) {
+    if (keys.byNameCity && existingKeys.byNameCity && keys.byNameCity === existingKeys.byNameCity) {
       return lead
     }
   }
@@ -70,7 +70,7 @@ export function mergeLeadData(existing: Lead, incoming: Omit<Lead, 'id'>): Parti
 export function normalizeLeadName(name: string): string {
   return name
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, '')  // preserve non-Latin scripts
     .replace(/\s+/g, ' ')
     .trim()
 }

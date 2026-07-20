@@ -37,6 +37,9 @@ export interface ResearchResult {
   teamMembers?: { name: string; role: string }[]
   confidence: number
   sourceUrl?: string
+  // Every URL actually fetched/searched while building this result, labeled
+  // by origin — lets the user manually verify each field against its source.
+  sources?: { label: string; url: string }[]
   createdAt: string
 }
 

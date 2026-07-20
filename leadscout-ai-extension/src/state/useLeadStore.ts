@@ -1,12 +1,29 @@
 import { create } from 'zustand'
 import type { Lead, LeadStatus, LeadFilter } from '@/types/lead'
 import { leadRepository } from '@/db/leadRepository'
-import { saveLeadValidationToSql } from '@/services/sqlSyncService'
+import { saveLeadValidationToSql, saveLeadMetaToSql } from '@/services/sqlSyncService'
+
+/** Country/city scope set by the Markets page — LeadTable applies it on top of its own filters. */
+export interface MarketScope {
+  country: string       // ISO code, or '??' for unassigned
+  countryName: string
+  city?: string
+}
+
+/** Global Search Session scope set from the Topbar switcher or a session card —
+ *  every lead-listing page applies it, so "Schools" and "Pesticides" runs never mix.
+ *  id -1 = Unassigned (leads captured before Search Sessions existed). */
+export interface ProjectScope {
+  id: number
+  name: string
+}
 
 interface LeadState {
   leads: Lead[]
   selectedIds: Set<number>
   filter: LeadFilter
+  marketScope: MarketScope | null
+  projectScope: ProjectScope | null
   loading: boolean
   detailLead: Lead | null
   loadLeads: (filter?: LeadFilter) => Promise<void>
@@ -18,6 +35,8 @@ interface LeadState {
   selectAll: () => void
   clearSelection: () => void
   setFilter: (filter: LeadFilter) => void
+  setMarketScope: (scope: MarketScope | null) => void
+  setProjectScope: (scope: ProjectScope | null) => void
   deleteLead: (id: number) => Promise<void>
   openDetail: (lead: Lead) => void
   closeDetail: () => void
@@ -27,6 +46,8 @@ export const useLeadStore = create<LeadState>((set, get) => ({
   leads: [],
   selectedIds: new Set(),
   filter: {},
+  marketScope: null,
+  projectScope: null,
   loading: false,
   detailLead: null,
 
@@ -73,6 +94,8 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       leads: s.leads.map((l) => (l.id === id ? { ...l, notes } : l)),
       detailLead: s.detailLead?.id === id ? { ...s.detailLead, notes } : s.detailLead,
     }))
+    const lead = get().leads.find((l) => l.id === id)
+    if (lead?.mssqlId) saveLeadMetaToSql(lead.mssqlId, { notes }).catch(() => {})
   },
 
   async updateLeadTags(id, tags) {
@@ -81,6 +104,8 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       leads: s.leads.map((l) => (l.id === id ? { ...l, tags } : l)),
       detailLead: s.detailLead?.id === id ? { ...s.detailLead, tags } : s.detailLead,
     }))
+    const lead = get().leads.find((l) => l.id === id)
+    if (lead?.mssqlId) saveLeadMetaToSql(lead.mssqlId, { tags }).catch(() => {})
   },
 
   toggleSelect(id) {
@@ -103,6 +128,14 @@ export const useLeadStore = create<LeadState>((set, get) => ({
 
   setFilter(filter) {
     set({ filter })
+  },
+
+  setMarketScope(scope) {
+    set({ marketScope: scope })
+  },
+
+  setProjectScope(scope) {
+    set({ projectScope: scope })
   },
 
   async deleteLead(id) {

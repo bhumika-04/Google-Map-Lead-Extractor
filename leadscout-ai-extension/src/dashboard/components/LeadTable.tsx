@@ -3,10 +3,17 @@ import type { Lead, LeadStatus, LeadFilter } from '@/types/lead'
 import { useLeadStore } from '@/state/useLeadStore'
 import { useSearchStore } from '@/state/useSearchStore'
 import { addToResearchQueue } from '@/services/futureResearchService'
-import { exportToCSV, exportToJSON } from '@/services/exportService'
+import { exportToJSON, exportToDoc } from '@/services/exportService'
+import { exportRowsToCSV, type ExportRowInput } from '@/utils/csvExport'
+import { researchResultRepository } from '@/db/researchResultRepository'
+import { leadRepository } from '@/db/leadRepository'
 import { activityLogRepository } from '@/db/activityLogRepository'
 import { toast } from '@/state/useToastStore'
 import { calculateLeadScore } from '@/utils/leadScore'
+import { pushBatchToCrm, pushLeadToCrm } from '@/services/crmService'
+import { useSettingsStore } from '@/state/useSettingsStore'
+import { runPreValidationEnrichment } from '@/services/preValidationEnrichmentService'
+import { resolveAiCredentials } from '@/services/sqlSyncService'
 import StatusBadge from './StatusBadge'
 import ScoreBadge from './ScoreBadge'
 import CopyBtn from './CopyBtn'
@@ -17,46 +24,62 @@ interface LeadTableProps {
   title?: string
 }
 
-type SortKey = 'score' | 'capturedAt' | 'rating' | 'companyName'
+type SortKey = 'score' | 'icpScore' | 'capturedAt' | 'rating' | 'companyName'
 type SortDir = 'asc' | 'desc'
 
-const ALL_COLUMNS = ['score', 'category', 'rating', 'phone', 'website', 'status', 'date'] as const
+const ALL_COLUMNS = ['icpScore', 'score', 'teamSize', 'turnover', 'category', 'rating', 'phone', 'website', 'status', 'date'] as const
 type ColKey = typeof ALL_COLUMNS[number]
 const COL_LABELS: Record<ColKey, string> = {
-  score: 'Score', category: 'Category', rating: 'Rating',
+  icpScore: 'ICP Score', score: 'Map Score', teamSize: 'Team Size', turnover: 'Turnover',
+  category: 'Category', rating: 'Rating',
   phone: 'Phone', website: 'Website', status: 'Status', date: 'Date',
 }
 
-function loadCols(): Set<ColKey> {
+// Per-view column storage: Selected Leads shows ICP Score by default, Lead Database does not
+function colKey(filterStatus?: string) {
+  return filterStatus === 'selected' ? 'lt_visible_cols_selected_v1' : 'lt_visible_cols_leads_v1'
+}
+function loadCols(filterStatus?: string): Set<ColKey> {
   try {
-    const saved = localStorage.getItem('lt_visible_cols')
+    const saved = localStorage.getItem(colKey(filterStatus))
     if (saved) return new Set(JSON.parse(saved) as ColKey[])
   } catch {}
-  return new Set(ALL_COLUMNS)
+  if (filterStatus === 'selected') {
+    // Selected Leads: ICP Score prominent, all enrichment columns
+    return new Set(['icpScore', 'score', 'teamSize', 'turnover', 'category', 'rating', 'phone', 'status', 'date'] as ColKey[])
+  }
+  // Lead Database: no ICP Score by default (new leads don't have it yet)
+  return new Set(['score', 'teamSize', 'turnover', 'category', 'rating', 'phone', 'status', 'date'] as ColKey[])
 }
-function saveCols(cols: Set<ColKey>) {
-  localStorage.setItem('lt_visible_cols', JSON.stringify([...cols]))
+function saveCols(cols: Set<ColKey>, filterStatus?: string) {
+  localStorage.setItem(colKey(filterStatus), JSON.stringify([...cols]))
 }
 
 export default function LeadTable({ filterStatus, title }: LeadTableProps) {
   const {
-    leads, selectedIds, loading,
-    loadLeads, updateLeadStatus, toggleSelect, selectAll, clearSelection, openDetail,
+    leads, selectedIds, loading, marketScope, projectScope,
+    loadLeads, updateLeadStatus, toggleSelect, selectAll, clearSelection, openDetail, setMarketScope, setProjectScope,
   } = useLeadStore()
   const { sessions } = useSearchStore()
+  const { settings } = useSettingsStore()
 
   const [sessionFilter, setSessionFilter] = useState<number | ''>('')
   const [search, setSearch]   = useState('')
   const [minRating, setMinRating] = useState<number>(0)
+  const [minIcpScore, setMinIcpScore] = useState<number>(0)
   const [hasPhone, setHasPhone]     = useState<boolean | null>(null)
   const [hasWebsite, setHasWebsite] = useState<boolean | null>(null)
+  const [hasTeamSize, setHasTeamSize] = useState<boolean | null>(null)
+  const [hasTurnover, setHasTurnover] = useState<boolean | null>(null)
   const [hideNotRelevant, setHideNotRelevant] = useState(false)
+  const [reEnriching, setReEnriching] = useState(false)
+  const [enrichProgress, setEnrichProgress] = useState<{ done: number; total: number } | null>(null)
   const [sortKey, setSortKey] = useState<SortKey>('capturedAt')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [compact, setCompact]       = useState(false)
   const [showFilters, setShowFilters] = useState(false)
   const [showCols, setShowCols]       = useState(false)
-  const [visibleCols, setVisibleCols] = useState<Set<ColKey>>(loadCols)
+  const [visibleCols, setVisibleCols] = useState<Set<ColKey>>(() => loadCols(filterStatus))
   const [page, setPage] = useState(1)
 
   // Undo delete: map id → { lead, timer }
@@ -67,47 +90,68 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
 
   useEffect(() => {
     const filter: LeadFilter = {}
-    if (filterStatus) filter.status = filterStatus
+    if (filterStatus === 'selected') {
+      // Show all leads that were ever selected — including those that progressed to research stages
+      filter.statuses = ['selected', 'research_pending', 'research_running', 'research_completed', 'research_failed']
+    } else if (filterStatus) {
+      filter.status = filterStatus
+    }
     if (sessionFilter !== '') filter.sessionId = sessionFilter as number
     if (minRating > 0) filter.minRating = minRating
     if (hasPhone !== null) filter.hasPhone = hasPhone
     if (hasWebsite !== null) filter.hasWebsite = hasWebsite
     if (hideNotRelevant && !filterStatus) filter.hideNotRelevant = true
+    // Market scope from the Markets page — country/city drill-down
+    if (marketScope) {
+      filter.country = marketScope.country
+      if (marketScope.city) filter.city = marketScope.city
+    }
+    // Global Search Session scope from the Topbar switcher / session cards
+    if (projectScope) filter.projectId = projectScope.id
     loadLeads(filter)
     setPage(1)
-  }, [filterStatus, sessionFilter, minRating, hasPhone, hasWebsite, hideNotRelevant])
+  }, [filterStatus, sessionFilter, minRating, hasPhone, hasWebsite, hideNotRelevant, marketScope, projectScope])
 
   function toggleCol(col: ColKey) {
     setVisibleCols((prev) => {
       const next = new Set(prev)
       if (next.has(col)) next.delete(col)
       else next.add(col)
-      saveCols(next)
+      saveCols(next, filterStatus)
       return next
     })
   }
 
   function col(key: ColKey) { return visibleCols.has(key) }
 
-  const activeFilterCount = [minRating > 0, hasPhone !== null, hasWebsite !== null, sessionFilter !== '', !hideNotRelevant === false].filter(Boolean).length
+  const activeFilterCount = [minRating > 0, minIcpScore > 0, hasPhone !== null, hasWebsite !== null, hasTeamSize !== null, hasTurnover !== null, sessionFilter !== '', hideNotRelevant].filter(Boolean).length
 
-  // Text search filter
+  // Text search + client-side filters
   const textFiltered = leads.filter((l) => {
-    if (!search) return true
-    const q = search.toLowerCase()
-    return (
-      l.companyName.toLowerCase().includes(q) ||
-      (l.city?.toLowerCase().includes(q) ?? false) ||
-      (l.category?.toLowerCase().includes(q) ?? false) ||
-      (l.phone?.includes(q) ?? false)
-    )
+    if (search) {
+      const q = search.toLowerCase()
+      const matches = (
+        l.companyName.toLowerCase().includes(q) ||
+        (l.city?.toLowerCase().includes(q) ?? false) ||
+        (l.category?.toLowerCase().includes(q) ?? false) ||
+        (l.phone?.includes(q) ?? false)
+      )
+      if (!matches) return false
+    }
+    if (minIcpScore > 0 && (l.icpScore ?? -1) < minIcpScore) return false
+    if (hasTeamSize === true  && !l.teamSize)       return false
+    if (hasTeamSize === false &&  l.teamSize)        return false
+    if (hasTurnover === true  && !l.annualTurnover)  return false
+    if (hasTurnover === false &&  l.annualTurnover)  return false
+    return true
   })
 
   // Sort
   const sorted = [...textFiltered].sort((a, b) => {
     let cmp = 0
-    if (sortKey === 'score')       cmp = calculateLeadScore(a) - calculateLeadScore(b)
-    else if (sortKey === 'rating') cmp = (a.rating ?? 0) - (b.rating ?? 0)
+    if (sortKey === 'score')        cmp = calculateLeadScore(a) - calculateLeadScore(b)
+    else if (sortKey === 'icpScore') cmp = (a.icpScore ?? -1) - (b.icpScore ?? -1)
+    else if (sortKey === 'rating')   cmp = (a.rating ?? 0) - (b.rating ?? 0)
     else if (sortKey === 'companyName') cmp = a.companyName.localeCompare(b.companyName)
     else cmp = a.capturedAt.localeCompare(b.capturedAt)
     return sortDir === 'asc' ? cmp : -cmp
@@ -184,6 +228,34 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
     toast.success(`${ids.length} leads marked as ${status}`)
   }
 
+  async function handleBulkCrmPush() {
+    if (!settings.crmApiUrl) {
+      toast.error('CRM URL not configured — go to Settings → CRM Integration')
+      return
+    }
+    const selected = leads.filter((l) => l.id !== undefined && selectedIds.has(l.id))
+    if (!selected.length) { toast.error('No leads selected'); return }
+    toast.info(`Pushing ${selected.length} leads to CRM…`)
+    const result = await pushBatchToCrm(selected, settings)
+    clearSelection()
+    if (result.failed === 0) {
+      toast.success(`${result.pushed} leads pushed to CRM`)
+    } else {
+      toast.error(`${result.pushed} pushed, ${result.failed} failed`)
+    }
+  }
+
+  async function handleCrmPush(lead: Lead, e: React.MouseEvent) {
+    e.stopPropagation()
+    if (!settings.crmApiUrl) {
+      toast.error('CRM URL not set — go to Settings → CRM Integration')
+      return
+    }
+    const result = await pushLeadToCrm(lead, settings)
+    if (result.ok) toast.success(`${lead.companyName} pushed to CRM`)
+    else toast.error(result.error ?? 'CRM push failed')
+  }
+
   async function handleBulkResearch() {
     const selected = leads.filter((l) => l.id !== undefined && selectedIds.has(l.id))
     let queued = 0
@@ -198,11 +270,41 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
     toast.success(`${queued} leads added to research queue`)
   }
 
-  function handleExportCSV() {
+  async function handleExportCSV() {
     const rows = selectedCount > 0
       ? leads.filter((l) => l.id !== undefined && selectedIds.has(l.id))
       : sorted
-    exportToCSV(rows, exportFilename('csv'))
+    const exportRows: ExportRowInput[] = await Promise.all(
+      rows.map(async (l) => {
+        const research = l.id !== undefined
+          ? await researchResultRepository.getByLeadId(l.id).catch(() => undefined)
+          : undefined
+        return {
+          name:               research?.decisionMaker || l.decisionMaker || l.companyName,
+          phone:              l.phone,
+          email:              research?.email,
+          tags:               l.tags,
+          creationDate:       l.capturedAt,
+          companyName:        l.companyName,
+          city:               l.city,
+          category:           l.category ?? l.keyword,
+          address:            l.address,
+          website:            l.website ?? research?.website,
+          rating:             l.rating,
+          icpScore:           l.icpScore,
+          icpStatus:          l.icpStatus,
+          turnover:           l.annualTurnover ?? research?.annualTurnover,
+          teamSize:           l.teamSize ?? research?.employeeCount,
+          coreMember:         l.decisionMaker ?? research?.teamMembers?.map((m) => m.role ? `${m.name} (${m.role})` : m.name).join('; ') ?? research?.decisionMaker,
+          workingDomain:      l.industry ?? research?.industry,
+          companyType:        l.companyType ?? research?.companyType,
+          cin:                l.cin,
+          uan:                l.uan,
+          defaultCountryCode: settings.interaktCountryCode,
+        }
+      })
+    )
+    exportRowsToCSV(exportRows, exportFilename('csv'))
     activityLogRepository.log('export_completed', `Exported ${rows.length} leads as CSV`)
     toast.success(`Exported ${rows.length} leads as CSV`)
   }
@@ -216,10 +318,81 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
     toast.success(`Exported ${rows.length} leads as JSON`)
   }
 
+  async function handleExportDoc() {
+    const rows = selectedCount > 0
+      ? leads.filter((l) => l.id !== undefined && selectedIds.has(l.id))
+      : sorted
+    const researchMap = new Map<number, import('@/types/research').ResearchResult>()
+    await Promise.all(
+      rows.map(async (l) => {
+        if (!l.id) return
+        const r = await researchResultRepository.getByLeadId(l.id).catch(() => undefined)
+        if (r) researchMap.set(l.id, r)
+      })
+    )
+    exportToDoc(rows, researchMap, exportFilename('doc'))
+    activityLogRepository.log('export_completed', `Exported ${rows.length} leads as DOC`)
+    toast.success(`Exported ${rows.length} leads as Word document`)
+  }
+
   function resetFilters() {
-    setMinRating(0); setHasPhone(null); setHasWebsite(null)
+    setMinRating(0); setMinIcpScore(0)
+    setHasPhone(null); setHasWebsite(null); setHasTeamSize(null); setHasTurnover(null)
     setSessionFilter(''); setSearch('')
     setHideNotRelevant(true)
+  }
+
+  async function handleReEnrich() {
+    if (reEnriching) return
+    if (!settings.geminiApiKey?.trim()) {
+      toast.warning('Enrichment uses Gemini grounding — add your Gemini API key in Settings → AI Research')
+      return
+    }
+    const { apiKey } = await resolveAiCredentials(settings)
+    const allLeads = await leadRepository.getAll()
+    if (allLeads.length === 0) { toast.info('No leads to enrich'); return }
+    setReEnriching(true)
+    setEnrichProgress({ done: 0, total: allLeads.length })
+    let enrichedCount = 0
+
+    const reloadFilter = filterStatus === 'selected'
+      ? { statuses: ['selected', 'research_pending', 'research_running', 'research_completed', 'research_failed'] as import('@/types/lead').LeadStatus[] }
+      : filterStatus ? { status: filterStatus as import('@/types/lead').LeadStatus } : {}
+
+    try {
+      // Clear ALL existing jobId=0 records so enrichment re-runs fresh for every lead
+      const existing = await researchResultRepository.getAll()
+      const allLeadIds = new Set(allLeads.map(l => l.id!))
+      const staleLeadIds = [...new Set(
+        existing.filter(r => r.jobId === 0 && allLeadIds.has(r.leadId)).map(r => r.leadId)
+      )]
+      for (const leadId of staleLeadIds) {
+        await researchResultRepository.deleteByLeadId(leadId)
+      }
+
+      await runPreValidationEnrichment(allLeads, settings, apiKey, (done, total) => {
+        enrichedCount = done
+        setEnrichProgress({ done, total })
+        // Reload table every 10 leads so data appears progressively
+        if (done % 10 === 0 || done === total) {
+          loadLeads(reloadFilter)
+        }
+      })
+
+      // Final reload + summary
+      loadLeads(reloadFilter)
+      if (enrichedCount > 0) {
+        toast.success(`Enrichment complete — ${enrichedCount} leads processed`)
+      } else {
+        toast.warning('Enrichment ran but no data returned — check Gemini API key in appsettings.json')
+      }
+    } catch (err) {
+      toast.error('Re-enrichment failed — check console')
+      console.error('[ReEnrich]', err)
+    } finally {
+      setReEnriching(false)
+      setEnrichProgress(null)
+    }
   }
 
   if (loading) return <TableSkeleton />
@@ -231,6 +404,30 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
       {/* Primary toolbar — row 1 */}
       <div className="flex items-center gap-2 flex-wrap">
         {title && <h2 className="font-semibold text-white text-sm shrink-0">{title}</h2>}
+
+        {/* Search Session scope chip (set from the Topbar switcher / session cards) */}
+        {projectScope && (
+          <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 bg-purple-950/60 border border-purple-700 text-purple-300 rounded-full shrink-0">
+            ◈ {projectScope.name}
+            <button
+              onClick={() => setProjectScope(null)}
+              className="text-purple-400 hover:text-white font-bold leading-none"
+              title="Clear session filter"
+            >×</button>
+          </span>
+        )}
+
+        {/* Market drill-down scope chip (set from the Markets page) */}
+        {marketScope && (
+          <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 bg-blue-950/60 border border-blue-700 text-blue-300 rounded-full shrink-0">
+            {marketScope.countryName}{marketScope.city ? ` › ${marketScope.city}` : ''}
+            <button
+              onClick={() => setMarketScope(null)}
+              className="text-blue-400 hover:text-white font-bold leading-none"
+              title="Clear market filter"
+            >×</button>
+          </span>
+        )}
 
         <input
           type="text"
@@ -284,6 +481,22 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
 
         <span className="text-xs text-gray-500 shrink-0">{sorted.length} leads</span>
 
+        {/* Re-enrich button — fills teamSize/turnover/industry for leads missing enrichment data */}
+        {!filterStatus && (
+          <button
+            onClick={handleReEnrich}
+            disabled={reEnriching}
+            title="Re-run AI enrichment for leads missing Team Size / Turnover / Industry data"
+            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition-colors shrink-0 ${
+              reEnriching
+                ? 'bg-purple-900/40 border-purple-700 text-purple-400 cursor-wait'
+                : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-purple-300 hover:border-purple-700'
+            }`}
+          >
+            {reEnriching ? '⟳ Enriching…' : '⚙ Re-enrich'}
+          </button>
+        )}
+
         {/* Hide Not Relevant toggle */}
         {!filterStatus && (
           <button
@@ -312,6 +525,11 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
             className="text-xs px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded-lg transition-colors border border-gray-700">
             JSON
           </button>
+          <button onClick={handleExportDoc}
+            className="text-xs px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded-lg transition-colors border border-gray-700"
+            title="Export as Word document (.doc) — opens in Microsoft Word or Google Docs">
+            DOC
+          </button>
           <button
             onClick={() => setCompact((v) => !v)}
             title={compact ? 'Comfortable view' : 'Compact view'}
@@ -323,6 +541,29 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
           </button>
         </div>
       </div>
+
+      {/* Enrichment progress bar */}
+      {enrichProgress && (
+        <div className="flex flex-col gap-1 bg-purple-950/40 border border-purple-800/40 rounded-xl px-3 py-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-purple-300 font-medium">
+              ⚙ Gemini enrichment — {enrichProgress.done} / {enrichProgress.total} leads
+            </span>
+            <span className="text-xs text-purple-400 tabular-nums">
+              {Math.round((enrichProgress.done / enrichProgress.total) * 100)}%
+            </span>
+          </div>
+          <div className="w-full h-1.5 bg-purple-950 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-purple-500 rounded-full transition-all duration-500"
+              style={{ width: `${(enrichProgress.done / enrichProgress.total) * 100}%` }}
+            />
+          </div>
+          <span className="text-xs text-purple-500">
+            ~{Math.ceil((enrichProgress.total - enrichProgress.done) * 1.5 / 60)} min remaining · data updates every 10 leads
+          </span>
+        </div>
+      )}
 
       {/* Bulk action bar — shown only when leads are selected */}
       {selectedCount > 0 && (
@@ -341,6 +582,12 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
               className="text-xs px-2.5 py-1 bg-purple-900 hover:bg-purple-800 text-purple-200 rounded-lg transition-colors">
               ⚗ Research
             </button>
+            {settings.crmApiUrl && (
+              <button onClick={handleBulkCrmPush}
+                className="text-xs px-2.5 py-1 bg-blue-900 hover:bg-blue-800 text-blue-200 rounded-lg transition-colors">
+                ⇥ Push to CRM
+              </button>
+            )}
           </div>
           <button onClick={clearSelection}
             className="ml-auto text-xs px-2.5 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg transition-colors">
@@ -387,6 +634,28 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
             <label className="text-xs text-gray-500">Website</label>
             <TriToggle value={hasWebsite} onChange={setHasWebsite} />
           </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500">Min ICP</label>
+            <select
+              value={minIcpScore}
+              onChange={(e) => setMinIcpScore(Number(e.target.value))}
+              className="bg-gray-800 border border-gray-700 text-white text-xs px-2 py-1.5 rounded-lg focus:outline-none focus:border-blue-500"
+            >
+              <option value={0}>Any</option>
+              <option value={50}>50+</option>
+              <option value={60}>60+</option>
+              <option value={70}>70+</option>
+              <option value={80}>80+</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500">Team Size</label>
+            <TriToggle value={hasTeamSize} onChange={setHasTeamSize} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500">Turnover</label>
+            <TriToggle value={hasTurnover} onChange={setHasTurnover} />
+          </div>
           {activeFilterCount > 0 && (
             <button onClick={resetFilters}
               className="text-xs px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded-lg transition-colors border border-gray-700 ml-auto">
@@ -422,13 +691,22 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
                     Company {sortIcon('companyName')}
                   </button>
                 </th>
-                {col('score') && (
-                  <th className="px-3 py-3 text-gray-500 font-medium w-20">
-                    <button onClick={() => toggleSort('score')} className="flex items-center hover:text-white transition-colors">
-                      Score {sortIcon('score')}
+                {col('icpScore') && (
+                  <th className="px-3 py-3 text-gray-500 font-medium w-24">
+                    <button onClick={() => toggleSort('icpScore')} className="flex items-center hover:text-white transition-colors">
+                      ICP Score {sortIcon('icpScore')}
                     </button>
                   </th>
                 )}
+                {col('score') && (
+                  <th className="px-3 py-3 text-gray-500 font-medium w-24">
+                    <button onClick={() => toggleSort('score')} className="flex items-center hover:text-white transition-colors">
+                      Map Score {sortIcon('score')}
+                    </button>
+                  </th>
+                )}
+                {col('teamSize') && <th className="px-3 py-3 text-gray-500 font-medium w-24">Team Size</th>}
+                {col('turnover') && <th className="px-3 py-3 text-gray-500 font-medium w-28">Turnover</th>}
                 {col('category') && <th className="px-3 py-3 text-gray-500 font-medium">Category</th>}
                 {col('rating') && (
                   <th className="px-3 py-3 text-gray-500 font-medium w-20">
@@ -458,10 +736,12 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
                   selected={lead.id !== undefined && selectedIds.has(lead.id)}
                   compact={compact}
                   visibleCols={visibleCols}
+                  showCrmButton={!!settings.crmApiUrl}
                   onToggle={(e) => { e.stopPropagation(); toggleSelect(lead.id!) }}
                   onRowClick={() => openDetail(lead)}
                   onStatusChange={(s, e) => handleStatusChange(lead, s, e)}
                   onResearch={(e) => handleResearch(lead, e)}
+                  onCrmPush={(e) => handleCrmPush(lead, e)}
                   onDelete={(e) => handleDelete(lead, e)}
                 />
               ))}
@@ -536,14 +816,16 @@ interface LeadRowProps {
   selected: boolean
   compact: boolean
   visibleCols: Set<ColKey>
+  showCrmButton: boolean
   onToggle: (e: React.MouseEvent) => void
   onRowClick: () => void
   onStatusChange: (s: LeadStatus, e: React.MouseEvent) => void
   onResearch: (e: React.MouseEvent) => void
+  onCrmPush: (e: React.MouseEvent) => void
   onDelete: (e: React.MouseEvent) => void
 }
 
-function LeadRow({ lead, selected, compact, visibleCols, onToggle, onRowClick, onStatusChange, onResearch, onDelete }: LeadRowProps) {
+function LeadRow({ lead, selected, compact, visibleCols, showCrmButton, onToggle, onRowClick, onStatusChange, onResearch, onCrmPush, onDelete }: LeadRowProps) {
   const py = compact ? 'py-1.5' : 'py-2.5'
   const col = (k: ColKey) => visibleCols.has(k)
 
@@ -562,13 +844,44 @@ function LeadRow({ lead, selected, compact, visibleCols, onToggle, onRowClick, o
         {lead.validationStatus === 'not_relevant' && <div className="text-gray-600 text-xs mt-0.5">✕ Not relevant</div>}
         {lead.notes && <div className="text-yellow-700 text-xs mt-0.5 truncate max-w-[140px]" title={lead.notes}>✎ {lead.notes}</div>}
       </td>
+      {col('icpScore') && (
+        <td className={`px-3 ${py}`}>
+          {lead.icpScore !== undefined ? (
+            <div className="flex flex-col gap-0.5">
+              <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${
+                lead.icpScore >= 80 ? 'bg-green-900/60 text-green-300' :
+                lead.icpScore >= 60 ? 'bg-blue-900/60 text-blue-300' :
+                lead.icpScore >= 50 ? 'bg-yellow-900/60 text-yellow-300' :
+                'bg-red-900/60 text-red-400'
+              }`}>{lead.icpScore}</span>
+              {lead.icpStatus && (
+                <span className="text-gray-600 text-xs">{lead.icpStatus.replace('_', ' ')}</span>
+              )}
+            </div>
+          ) : <span className="text-gray-700">—</span>}
+        </td>
+      )}
       {col('score') && (
         <td className={`px-3 ${py}`}>
           <ScoreBadge lead={lead} />
         </td>
       )}
+      {col('teamSize') && (
+        <td className={`px-3 ${py} text-gray-400`}>
+          {lead.teamSize
+            ? <span>{lead.teamSize}{lead.teamSizeVerified === false && <span className="ml-1 text-xs text-yellow-600 font-medium">Est.</span>}</span>
+            : '—'}
+        </td>
+      )}
+      {col('turnover') && (
+        <td className={`px-3 ${py} text-gray-400`}>
+          {lead.annualTurnover
+            ? <span>{lead.annualTurnover}{lead.turnoverVerified === false && <span className="ml-1 text-xs text-yellow-600 font-medium">Est.</span>}</span>
+            : '—'}
+        </td>
+      )}
       {col('category') && (
-        <td className={`px-3 ${py} text-gray-400 truncate max-w-[110px]`}>{lead.category ?? '—'}</td>
+        <td className={`px-3 ${py} text-gray-400 truncate max-w-[110px]`}>{lead.category ?? lead.keyword ?? '—'}</td>
       )}
       {col('rating') && (
         <td className={`px-3 ${py}`}>
@@ -617,6 +930,9 @@ function LeadRow({ lead, selected, compact, visibleCols, onToggle, onRowClick, o
           )}
           {!lead.status.startsWith('research') && (
             <ActionBtn onClick={onResearch} title="Research" cls="bg-purple-900/60 hover:bg-purple-800 text-purple-300">⚗</ActionBtn>
+          )}
+          {showCrmButton && (
+            <ActionBtn onClick={onCrmPush} title="Push to CRM" cls="bg-blue-900/60 hover:bg-blue-800 text-blue-300">⇥</ActionBtn>
           )}
           {lead.googleMapsUrl && (
             <a href={lead.googleMapsUrl} target="_blank" rel="noreferrer"

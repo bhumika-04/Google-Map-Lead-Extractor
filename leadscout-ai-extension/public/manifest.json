@@ -28,6 +28,16 @@
       ],
       "js": ["content/mapsContent.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.linkedin.com/*"],
+      "js": ["content/linkedinProbe.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.linkedin.com/*"],
+      "js": ["content/linkedinScraper.js"],
+      "run_at": "document_idle"
     }
   ],
   "permissions": [
@@ -40,6 +50,7 @@
   "host_permissions": [
     "https://www.google.com/maps/*",
     "https://maps.google.com/*",
+    "https://www.linkedin.com/*",
     "https://api.anthropic.com/*",
     "https://api.openai.com/*",
     "http://localhost:5150/*",

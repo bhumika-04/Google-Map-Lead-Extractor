@@ -53,7 +53,16 @@ export default function BackupRestoreSection() {
       const companies = data.companies ?? []
 
       if (companies.length === 0) {
-        // MSSQL is empty — clear local cache to match
+        // MSSQL is empty — this would wipe local data to match. Same destructive
+        // action as "Clear All Local Data" below, so it needs the same confirmation
+        // (previously this ran with zero warning — the cause of a real data-loss incident).
+        const localCount = await db.leads.count()
+        const ok = confirm(
+          `MSSQL returned 0 companies, but you have ${localCount} leads stored locally.\n\n` +
+          `Continuing will DELETE all ${localCount} local leads and research data to match the empty database.\n\n` +
+          `This cannot be undone. Continue?`
+        )
+        if (!ok) { toast.info('Sync cancelled — local data unchanged'); return }
         await clearAllLocalData()
         await refreshCounts()
         toast.success('MSSQL is empty — local data cleared to match')

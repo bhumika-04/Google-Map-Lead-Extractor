@@ -70,10 +70,19 @@ export class AutoScroller {
     }
 
     // Check if the panel has stopped growing after scrolling to the bottom
-    // (geometric check — works regardless of Google Maps DOM class changes)
+    // (geometric check — works regardless of Google Maps DOM class changes).
+    // This fires constantly during normal lazy-loading — scrolling near the
+    // bottom of the CURRENTLY rendered content happens on almost every scroll,
+    // well before Maps has fetched the next batch. The previous threshold of
+    // 3 (just 6-9s of patience) was the dominant cause of ending searches
+    // early with far fewer leads than actually existed. Still faster than the
+    // main no-new-leads check below (being geometrically at the bottom is a
+    // stronger true-completion signal), but with real patience for a lazy-load
+    // batch to arrive.
+    const AT_BOTTOM_PATIENCE = Math.min(10, this.noNewLeadThreshold)
     const atBottom = panel.scrollHeight > 0 &&
       (panel.scrollTop + panel.clientHeight) >= (panel.scrollHeight - 50)
-    if (atBottom && this.noNewCount >= 3) {
+    if (atBottom && this.noNewCount >= AT_BOTTOM_PATIENCE) {
       this.running = false
       this.onStop('end_of_list')
       return

@@ -1,7 +1,28 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
-import { copyFileSync, mkdirSync, renameSync, existsSync, rmSync } from 'fs'
+import { copyFileSync, mkdirSync, existsSync, rmSync, readFileSync, writeFileSync } from 'fs'
+
+// Content script entries that must be wrapped in IIFEs so their minified
+// local variables never collide when multiple scripts run in the same page context.
+
+function contentScriptIifePlugin() {
+  return {
+    name: 'content-script-iife-wrap',
+    // Runs after Rollup writes each chunk to disk
+    writeBundle(_opts: unknown, bundle: Record<string, { type: string; fileName: string; code?: string }>) {
+      for (const chunk of Object.values(bundle)) {
+        if (chunk.type !== 'chunk' || !chunk.code) continue
+        // Match by output file path (e.g. "content/linkedinScraper.js")
+        const isContentScript = chunk.fileName.startsWith('content/')
+        if (!isContentScript) continue
+        const outPath = resolve(__dirname, 'dist', chunk.fileName)
+        const wrapped = `;(function(){\n${chunk.code}\n})();\n`
+        writeFileSync(outPath, wrapped)
+      }
+    },
+  }
+}
 
 // Copies manifest + moves HTML files to correct Chrome Extension paths after build
 function chromeExtensionPlugin() {
@@ -34,7 +55,7 @@ function chromeExtensionPlugin() {
 }
 
 export default defineConfig({
-  plugins: [react(), chromeExtensionPlugin()],
+  plugins: [react(), chromeExtensionPlugin(), contentScriptIifePlugin()],
   build: {
     outDir: 'dist',
     emptyOutDir: true,
@@ -44,12 +65,16 @@ export default defineConfig({
         popup:         resolve(__dirname, 'src/popup/popup.html'),
         dashboard:     resolve(__dirname, 'src/dashboard/dashboard.html'),
         serviceWorker: resolve(__dirname, 'src/background/serviceWorker.ts'),
-        mapsContent:   resolve(__dirname, 'src/content/mapsContent.ts'),
+        mapsContent:     resolve(__dirname, 'src/content/mapsContent.ts'),
+        linkedinProbe:   resolve(__dirname, 'src/content/linkedinProbe.ts'),
+        linkedinScraper: resolve(__dirname, 'src/content/linkedinScraper.ts'),
       },
       output: {
         entryFileNames: (chunkInfo) => {
           if (chunkInfo.name === 'serviceWorker') return 'background/serviceWorker.js'
           if (chunkInfo.name === 'mapsContent')   return 'content/mapsContent.js'
+          if (chunkInfo.name === 'linkedinProbe')   return 'content/linkedinProbe.js'
+          if (chunkInfo.name === 'linkedinScraper') return 'content/linkedinScraper.js'
           return 'assets/[name]-[hash].js'
         },
         chunkFileNames: 'assets/[name]-[hash].js',

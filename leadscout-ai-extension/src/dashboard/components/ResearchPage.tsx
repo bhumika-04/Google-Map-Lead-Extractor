@@ -6,9 +6,20 @@ import { researchResultRepository } from '@/db/researchResultRepository'
 import { leadRepository } from '@/db/leadRepository'
 import { db } from '@/db/db'
 import { runDeepResearch } from '@/services/deepResearchService'
+import { saveDeepResearchToSql } from '@/services/sqlSyncService'
+import { useSettingsStore } from '@/state/useSettingsStore'
+import { useLeadStore } from '@/state/useLeadStore'
+import { exportRowsToCSV, exportFullCSV, type ExportRowInput } from '@/utils/csvExport'
+import { exportToPdf } from '@/services/exportService'
+import { OutreachPanel } from './OutreachPanel'
 import CopyBtn from './CopyBtn'
 
-type DetailTab = 'business' | 'persona' | 'contact' | 'social'
+// Lightweight pre-validation enrichment results are saved with jobId 0 (see
+// LIGHTWEIGHT_JOB_ID in autoPipelineService.ts) — they only carry a handful of
+// fields used to feed the validation prompt, not a full deep-research pass.
+const LIGHTWEIGHT_JOB_ID = 0
+
+type DetailTab = 'business' | 'persona' | 'contact' | 'social' | 'outreach'
 
 interface EnrichedResult extends ResearchResult {
   lead?: Lead
@@ -18,6 +29,7 @@ export default function ResearchPage() {
   const [results, setResults] = useState<EnrichedResult[]>([])
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<EnrichedResult | null>(null)
+  const { projectScope } = useLeadStore()
 
   async function load() {
     const all = await researchResultRepository.getAll()
@@ -27,12 +39,84 @@ export default function ResearchPage() {
         return { ...r, lead: lead ?? undefined }
       })
     )
-    enriched.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    setResults(enriched)
+    // The lightweight pre-validation enrichment pass writes a stub result for
+    // EVERY captured lead (it needs to, to feed the validation prompt) — but a
+    // lead still sitting at 'new' hasn't been validated yet, or was validated
+    // and rejected as not relevant. Either way it doesn't belong in Research
+    // Results, which should only ever show leads that passed validation.
+    //
+    // Additionally: a lead can sit at 'selected' or 'research_pending' with
+    // ONLY the lightweight stub (jobId=0) present — its real research hasn't
+    // started yet. Showing that stub here looks like "every lead already has
+    // a research result" the instant validation finishes. Only surface it
+    // once research has actually started running (or a real job completed).
+    const relevant = enriched.filter((r) => {
+      if (!r.lead || r.lead.status === 'new' || r.lead.status === 'rejected') return false
+      // Global Search Session scope (Topbar switcher)
+      if (projectScope) {
+        if (projectScope.id === -1) { if (r.lead.projectId !== undefined) return false }
+        else if (r.lead.projectId !== projectScope.id) return false
+      }
+      if (r.jobId === LIGHTWEIGHT_JOB_ID) {
+        return r.lead.status === 'research_running' || r.lead.status === 'research_completed' || r.lead.status === 'research_failed'
+      }
+      return true
+    })
+    relevant.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    setResults(relevant)
     setLoading(false)
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [projectScope])
+
+  const { settings } = useSettingsStore()
+
+  function handleExportCSV() {
+    const rows: ExportRowInput[] = results.map((r) => ({
+      name: r.decisionMaker || r.lead?.companyName,
+      phone: r.lead?.phone,
+      email: r.email,
+      tags: r.lead?.city ? [r.lead.city, ...(r.lead.tags ?? [])] : r.lead?.tags,
+      creationDate: r.lead?.capturedAt ?? r.createdAt,
+      companyName: r.lead?.companyName,
+      address: r.lead?.address,
+      turnover: r.annualTurnover,
+      teamSize: r.employeeCount,
+      coreMember: r.teamMembers?.map((m) => m.role ? `${m.name} (${m.role})` : m.name).join('; ') || r.decisionMaker,
+      workingDomain: r.industry,
+      defaultCountryCode: settings.interaktCountryCode,
+    }))
+    exportRowsToCSV(rows, `research-results-export-${Date.now()}.csv`)
+  }
+
+  function handleExportFullCSV() {
+    const headers = [
+      'Company Name', 'City', 'Category', 'Address', 'Phone',
+      'Website', 'Email', 'Alternate Phone', 'WhatsApp',
+      'Decision Maker', 'Decision Maker LinkedIn',
+      'LinkedIn Company', 'Facebook', 'Instagram', 'Twitter', 'YouTube',
+      'Industry', 'Company Type', 'Supplier/Buyer Type',
+      'Employee Count', 'Annual Turnover', 'Year Founded', 'Headquarters',
+      'Tagline', 'Summary',
+      'Services', 'Certifications', 'Major Clients', 'Export Markets',
+      'Current Software', 'Expansion Signals', 'Pain Points',
+      'Team Members', 'Confidence', 'Source URL', 'Researched At',
+    ]
+    const rows = results.map((r) => [
+      r.lead?.companyName, r.lead?.city, r.lead?.keyword, r.lead?.address, r.lead?.phone,
+      r.website, r.email, r.alternatePhone, r.whatsapp,
+      r.decisionMaker, r.decisionMakerLinkedIn,
+      r.linkedIn, r.facebook, r.instagram, r.twitter, r.youtube,
+      r.industry, r.companyType, r.supplierBuyerType,
+      r.employeeCount, r.annualTurnover, r.yearFounded, r.headquarters,
+      r.tagline, r.summary,
+      r.services?.join('; '), r.certifications?.join('; '), r.majorClients?.join('; '), r.exportMarkets?.join('; '),
+      r.currentSoftware?.join('; '), r.expansionSignals?.join('; '), r.painPoints?.join('; '),
+      r.teamMembers?.map((m) => m.role ? `${m.name} (${m.role})` : m.name).join('; '),
+      Math.round(r.confidence * 100), r.sourceUrl, r.createdAt,
+    ])
+    exportFullCSV(headers, rows, `research-results-full-export-${Date.now()}.csv`)
+  }
 
   const conf = (r: ResearchResult) => Math.round(r.confidence * 100)
   const confColor = (r: ResearchResult) => {
@@ -62,8 +146,33 @@ export default function ResearchPage() {
     <div className="flex-1 flex gap-4 min-h-0">
       {/* Left: result list */}
       <div className="w-72 shrink-0 flex flex-col gap-2 overflow-y-auto pr-1">
-        <div className="text-xs text-gray-500 mb-1">
-          {results.length} researched {results.length === 1 ? 'lead' : 'leads'}
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-xs text-gray-500">
+            {results.length} researched {results.length === 1 ? 'lead' : 'leads'}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={handleExportCSV}
+              title="Interakt/WhatsApp-compatible CSV (12 columns)"
+              className="text-xs px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded-lg transition-colors border border-gray-700"
+            >
+              ⤓ CSV
+            </button>
+            <button
+              onClick={handleExportFullCSV}
+              title="Full research data CSV (all fields)"
+              className="text-xs px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded-lg transition-colors border border-gray-700"
+            >
+              ⤓ Full CSV
+            </button>
+            <button
+              onClick={() => exportToPdf(results)}
+              title="Export as PDF — one page per lead with all research data"
+              className="text-xs px-2 py-1 bg-red-950/50 hover:bg-red-900/60 text-red-400 hover:text-red-300 rounded-lg transition-colors border border-red-900/50"
+            >
+              ⤓ PDF
+            </button>
+          </div>
         </div>
         {results.map((r) => (
           <button
@@ -86,6 +195,9 @@ export default function ResearchPage() {
               </div>
               <span className={`text-xs font-semibold shrink-0 ${confColor(r)}`}>{conf(r)}%</span>
             </div>
+            {r.jobId === LIGHTWEIGHT_JOB_ID && (
+              <div className="text-xs text-amber-500 mt-1.5">⏳ Quick enrichment — full research pending</div>
+            )}
             {r.decisionMaker && (
               <div className="text-xs text-purple-400 mt-1.5 truncate">👤 {r.decisionMaker}</div>
             )}
@@ -114,6 +226,9 @@ export default function ResearchPage() {
 
 function ResultDetail({ result }: { result: EnrichedResult }) {
   const [tab, setTab] = useState<DetailTab>('business')
+  const { settings, loaded: settingsLoaded, load: loadSettings } = useSettingsStore()
+
+  useEffect(() => { if (!settingsLoaded) loadSettings() }, [settingsLoaded, loadSettings])
   const [deepResearch, setDeepResearch] = useState<DeepResearch | null>(null)
   const [deepRunning, setDeepRunning] = useState(false)
   const [deepError, setDeepError] = useState<string | null>(null)
@@ -135,25 +250,32 @@ function ResultDetail({ result }: { result: EnrichedResult }) {
     setDeepError(null)
     setDeepProgress('Starting deep research…')
     try {
-      const keyRecord = await db.settings.get('openAiApiKey')
-      const modelRecord = await db.settings.get('openAiModel')
-      const apiKey = keyRecord?.value ?? ''
-      const model = modelRecord?.value ?? 'gpt-4o-mini'
-      if (!apiKey) throw new Error('OpenAI API key not set — go to Settings → AI Research → OpenAI')
+      // Pick API key + model from the active provider in settings
+      const { researchProvider, openAiApiKey, openAiModel, geminiApiKey, geminiModel, anthropicApiKey, anthropicModel } = settings
+      let apiKey = ''
+      let model  = ''
+      if (researchProvider === 'gemini')    { apiKey = geminiApiKey;    model = geminiModel }
+      else if (researchProvider === 'openai') { apiKey = openAiApiKey;   model = openAiModel }
+      else                                    { apiKey = anthropicApiKey; model = anthropicModel }
+      if (!apiKey) throw new Error(`${researchProvider} API key not set — go to Settings → AI Research`)
 
       const dr = await runDeepResearch(
         result, result.lead, apiKey, model,
         (msg) => setDeepProgress(msg),
       )
       const id = await db.deepResearch.add(dr)
-      setDeepResearch({ ...dr, id: id as number })
+      const saved = { ...dr, id: id as number }
+      setDeepResearch(saved)
+
+      // Sync to MSSQL — best-effort, does not block UI
+      saveDeepResearchToSql(result.lead, saved).catch(() => {})
     } catch (err: any) {
       setDeepError(err?.message ?? 'Deep research failed')
     } finally {
       setDeepRunning(false)
       setDeepProgress('')
     }
-  }, [result])
+  }, [result, settings])
 
   const c = Math.round(result.confidence * 100)
   const confColor = c >= 75 ? 'text-green-400 bg-green-950/30 border-green-900/50'
@@ -164,14 +286,27 @@ function ResultDetail({ result }: { result: EnrichedResult }) {
     result.website || result.linkedIn || result.facebook || result.instagram ||
     result.twitter || result.youtube || (result.teamMembers?.length ?? 0) > 0)
 
-  const hasPersona = !!(result.decisionMaker || result.decisionMakerLinkedIn ||
-    (result.painPoints?.length ?? 0) > 0)
+  const hasPersona = !!(
+    result.decisionMaker ||
+    result.decisionMakerLinkedIn ||
+    (result.painPoints?.length       ?? 0) > 0 ||
+    (result.expansionSignals?.length ?? 0) > 0 ||
+    (result.currentSoftware?.length  ?? 0) > 0 ||
+    (result.teamMembers?.length      ?? 0) > 0 ||
+    (result.majorClients?.length     ?? 0) > 0 ||
+    result.annualTurnover ||
+    result.employeeCount ||
+    result.email ||
+    result.alternatePhone ||
+    result.whatsapp
+  )
 
   const tabs: { id: DetailTab; label: string; icon: string }[] = [
     { id: 'business', label: 'Business Profile', icon: '🏢' },
     { id: 'persona',  label: 'Buyer Persona',    icon: '👤' },
     { id: 'contact',  label: 'Contact',           icon: '✉' },
     { id: 'social',   label: 'Social Intel',      icon: '📡' },
+    { id: 'outreach', label: 'Outreach',           icon: '💬' },
   ]
 
   return (
@@ -191,6 +326,12 @@ function ResultDetail({ result }: { result: EnrichedResult }) {
               {c}% confidence
             </span>
           </div>
+          {result.jobId === LIGHTWEIGHT_JOB_ID && (
+            <div className="text-xs text-amber-500 mt-1.5">
+              ⏳ This is quick enrichment only (used to score relevance) — full deep research for this lead hasn't completed yet.
+              It will fill in automatically once its turn in the research queue comes up.
+            </div>
+          )}
           {result.tagline && (
             <p className="text-xs text-gray-500 italic mt-1">"{result.tagline}"</p>
           )}
@@ -229,8 +370,35 @@ function ResultDetail({ result }: { result: EnrichedResult }) {
           onRun={handleDeepResearch}
         />
       )}
+      {tab === 'outreach' && result.lead && (
+        <OutreachPanel
+          result={result}
+          lead={result.lead}
+          deepResearch={deepResearch}
+          settings={settings}
+          mssqlCompanyId={result.lead.mssqlId ?? null}
+        />
+      )}
 
-      {result.sourceUrl && (
+      {result.sources && result.sources.length > 0 ? (
+        <div className="text-xs text-gray-700 space-y-1 border-t border-gray-800 pt-2">
+          <div className="text-gray-600">Sources used (verify manually):</div>
+          {result.sources.map((s) => (
+            <div key={s.url} className="flex items-center gap-1.5">
+              <span className="text-gray-600 shrink-0">{s.label}:</span>
+              <a
+                href={s.url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="text-blue-800 hover:text-blue-600 hover:underline transition-colors truncate"
+              >
+                {s.url.replace(/^https?:\/\//, '').slice(0, 70)}↗
+              </a>
+            </div>
+          ))}
+        </div>
+      ) : result.sourceUrl && (
         <div className="text-xs text-gray-700 flex items-center gap-1.5">
           <span>Source:</span>
           <a
@@ -413,6 +581,49 @@ function PersonaTab({ result, hasData }: { result: EnrichedResult; hasData: bool
           )}
         </div>
       </Card>
+
+      {/* Quick business facts relevant to persona */}
+      {(result.annualTurnover || result.employeeCount) && (
+        <Card title="Company Size & Revenue">
+          <div className="grid grid-cols-2 gap-2">
+            {result.employeeCount && <FactCell label="Team Size" value={result.employeeCount + ' employees'} />}
+            {result.annualTurnover && <FactCell label="Annual Turnover" value={result.annualTurnover} />}
+          </div>
+        </Card>
+      )}
+
+      {/* Team members */}
+      {result.teamMembers && result.teamMembers.length > 0 && (
+        <Card title="Key People">
+          <div className="space-y-2">
+            {result.teamMembers.map((m, i) => (
+              <div key={i} className="flex items-center gap-3 bg-gray-800/60 rounded-lg px-3 py-2.5">
+                <div className="w-8 h-8 rounded-full bg-indigo-900 border border-indigo-700 flex items-center justify-center text-xs font-bold text-indigo-200 shrink-0">
+                  {m.name.charAt(0).toUpperCase()}
+                </div>
+                <div>
+                  <div className="text-sm font-medium text-white">{m.name}</div>
+                  <div className="text-xs text-gray-500">{m.role}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Major clients */}
+      {result.majorClients && result.majorClients.length > 0 && (
+        <Card title="Key Clients (Social Proof)">
+          <div className="flex flex-wrap gap-1.5">
+            {result.majorClients.map((c) => (
+              <span key={c} className="text-xs px-2.5 py-1 bg-purple-950 border border-purple-800 text-purple-300 rounded-full font-medium">
+                {c}
+              </span>
+            ))}
+          </div>
+          <p className="text-xs text-gray-600 mt-2">Use these as social proof — mention their competitors or reference similar clients</p>
+        </Card>
+      )}
 
       {/* Pain points */}
       {result.painPoints && result.painPoints.length > 0 && (

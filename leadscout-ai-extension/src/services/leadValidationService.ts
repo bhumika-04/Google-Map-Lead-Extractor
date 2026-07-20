@@ -5,7 +5,10 @@ export interface ValidationResult {
   leadId: number
   relevant: boolean
   reason: string
-  confidence: number
+  confidence: number  // 0-1, derived from icpScore/100
+  icpScore: number    // 0-100 integer ICP score
+  icpStatus: string   // 'high_fit' | 'good_fit' | 'low_priority' | 'hold' | 'reject'
+  scoreBreakdown?: string  // e.g. "Industry:20 Scale:18 ERP:15 BizType:10 DM:7"
 }
 
 export type ValidationProvider = 'gemini' | 'openai' | 'anthropic'
@@ -14,7 +17,7 @@ const BATCH_SIZE = 10
 const BATCH_DELAY_MS = 20000
 
 // Per-provider fast/cheap models for simple classification
-const GEMINI_MODEL   = 'gemini-2.0-flash-lite'
+const GEMINI_MODEL   = 'gemini-flash-latest'
 const OPENAI_MODEL   = 'gpt-4o-mini'
 const ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001'
 
@@ -26,31 +29,122 @@ function buildBatchPrompt(
     `${i + 1}. ID:${l.leadId} | "${l.name}" | Category: ${l.category || 'Unknown'} | City: ${l.city}${l.extra ? ` | ${l.extra}` : ''}`
   ).join('\n')
 
-  return `You are a B2B lead qualification expert. Evaluate each company below and decide if it is a relevant sales prospect for the given business.
+  return `You are a B2B lead qualification scorer. Score each lead on a 100-point scale using the 5 dimensions below. Use all available data — company name, category, city, and any enrichment data provided.
+
+The MY BUSINESS description below is the ONLY source of truth for what industries, company types, and customer profile are relevant. Do not assume any specific industry (printing, packaging, or otherwise) beyond what MY BUSINESS actually describes — infer the target customer industry, typical company size, and product/software need entirely from that text.
 
 MY BUSINESS:
 ${businessProfile}
 
+━━━ HARD REJECT RULES (apply first — if any match, score = 0, relevant = false) ━━━
+R1. Industry mismatch: the lead's company/category is clearly NOT in the target industry (or a directly adjacent one) described in MY BUSINESS above.
+R2. Excluded type: a single-counter micro retail/service operation with no real production or business operations behind it — not a company MY BUSINESS's product would meaningfully serve.
+R3. Too small: Annual Turnover explicitly stated as below ₹1 Crore (e.g. "5 Lakh or Less", "Below 1 Cr", "₹25 Lakh - ₹1 Cr") — or below whatever minimum company size MY BUSINESS specifies, if it specifies one. If turnover is unknown or estimated, do NOT reject on this rule.
+
+━━━ SCORING DIMENSIONS (only if no hard reject) ━━━
+
+DIM 1 — Industry Fit (0–30 pts)
+  30 = Exact match: the lead's industry/category is exactly the target customer type described in MY BUSINESS
+  20 = Strong adjacent: a closely related industry that MY BUSINESS's product would still clearly serve
+  10 = Borderline: allied industry with plausible production/operations relevant to MY BUSINESS
+   0 = No clear match (but wasn't hard-rejected above)
+
+DIM 2 — Company Scale (0–25 pts)
+  Use Annual Turnover if available, else Employee Count, else estimate from category/context.
+  25 = ₹10 Cr+ turnover OR 50+ employees
+  18 = ₹1–10 Cr turnover OR 20–50 employees
+  10 = Turnover unknown, estimated mid-size (10–20 employees inferred)
+   5 = Small but not micro (estimated 6–10 employees)
+   0 = Clearly micro / 1–5 employees (do not hard-reject unless R3 applies)
+
+DIM 3 — Product / Software Need (0–25 pts)
+  Judge this against whatever MY BUSINESS actually sells (ERP, compliance software, production tools, services, etc.) — not a fixed assumption.
+  25 = Clear operational need: the lead's scale/category strongly implies they'd need what MY BUSINESS sells
+  15 = Moderate operations: some need likely
+   5 = Possible need but unclear from available data
+   0 = No apparent need for what MY BUSINESS sells
+
+DIM 4 — Business Type (0–10 pts)
+  10 = Manufacturer / producer / plant operator (or MY BUSINESS's ideal operating model)
+   5 = Mixed producer + trader/distributor
+   0 = Pure trader / distributor / service agency with no production
+
+DIM 5 — Decision Maker Availability (0–10 pts)
+  10 = Named decision maker (MD/Owner/Director) known
+   5 = Role known but name unknown
+   0 = No decision maker info available
+
+━━━ THRESHOLDS ━━━
+80–100 = High Priority  → relevant: true
+60–79  = Good Lead      → relevant: true
+50–59  = Low Priority   → relevant: true, prefix reason with "LOW:"
+Below 50 = Reject/Hold  → relevant: false
+
 LEADS TO EVALUATE:
 ${leadLines}
 
-For each lead, decide:
-- relevant: true if this company would likely need or benefit from what my business offers
-- relevant: false if this company is clearly not a fit (wrong industry, too small, retail/consumer shop, irrelevant category)
-- reason: one short sentence explaining why (e.g. "Printing factory — ERP for production fits well" or "Stationary retail shop — no manufacturing, not a fit")
-- confidence: 0.0 to 1.0
-
 Return ONLY a valid JSON array, no markdown:
 [
-  {"leadId": <id>, "relevant": true, "reason": "...", "confidence": 0.9},
-  {"leadId": <id>, "relevant": false, "reason": "...", "confidence": 0.85}
+  {
+    "leadId": <id>,
+    "icpScore": 85,
+    "icpStatus": "high_fit",
+    "relevant": true,
+    "reason": "High Priority — exact industry match, 200+ employees, ₹100-500 Cr, clear product need",
+    "scoreBreakdown": "Industry:30 Scale:25 Need:20 BizType:5 DM:5"
+  },
+  {
+    "leadId": <id>,
+    "icpScore": 0,
+    "icpStatus": "reject",
+    "relevant": false,
+    "reason": "R1: industry unrelated to MY BUSINESS's target customers",
+    "scoreBreakdown": "Industry:0 Scale:0 Need:0 BizType:0 DM:0"
+  }
 ]`
+}
+
+function icpStatusFromScore(score: number): string {
+  if (score >= 80) return 'high_fit'
+  if (score >= 60) return 'good_fit'
+  if (score >= 50) return 'low_priority'
+  if (score > 0)   return 'hold'
+  return 'reject'
 }
 
 function parseJsonArray(text: string): ValidationResult[] {
   const match = text.match(/\[[\s\S]*\]/)
   if (!match) throw new Error('No JSON array in response')
-  return JSON.parse(match[0]) as ValidationResult[]
+  const raw = JSON.parse(match[0]) as Array<Record<string, unknown>>
+
+  return raw.map((r) => {
+    // Support both icpScore (new) and confidence (old) — prefer icpScore
+    let icpScore: number
+    if (typeof r.icpScore === 'number') {
+      icpScore = Math.round(Math.max(0, Math.min(100, r.icpScore)))
+    } else if (typeof r.confidence === 'number') {
+      // Old format: confidence is 0-1, convert to 0-100
+      icpScore = Math.round(Math.max(0, Math.min(100, (r.confidence as number) * 100)))
+    } else {
+      icpScore = 0
+    }
+
+    const icpStatus = (typeof r.icpStatus === 'string' && r.icpStatus)
+      ? r.icpStatus
+      : icpStatusFromScore(icpScore)
+
+    const relevant = icpScore >= 50 && r.relevant !== false
+
+    return {
+      leadId:         typeof r.leadId === 'number' ? r.leadId : 0,
+      relevant,
+      reason:         typeof r.reason === 'string' ? r.reason : '',
+      confidence:     icpScore / 100,
+      icpScore,
+      icpStatus,
+      scoreBreakdown: typeof r.scoreBreakdown === 'string' ? r.scoreBreakdown : undefined,
+    }
+  })
 }
 
 async function callGeminiBatch(prompt: string, apiKey: string): Promise<ValidationResult[]> {
@@ -60,7 +154,7 @@ async function callGeminiBatch(prompt: string, apiKey: string): Promise<Validati
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
+      generationConfig: { temperature: 0.1, maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } },
     }),
   })
   if (!response.ok) {
@@ -80,7 +174,9 @@ async function callOpenAiBatch(prompt: string, apiKey: string): Promise<Validati
       model: OPENAI_MODEL,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
-      max_tokens: 2048,
+      // 10 leads × (reason + breakdown) can exceed 2048 tokens — a truncated
+      // array fails JSON.parse and the whole batch fails as "non-retryable".
+      max_tokens: 4096,
     }),
   })
   if (!response.ok) {
@@ -102,7 +198,7 @@ async function callAnthropicBatch(prompt: string, apiKey: string): Promise<Valid
     },
     body: JSON.stringify({
       model: ANTHROPIC_MODEL,
-      max_tokens: 2048,
+      max_tokens: 4096,
       messages: [{ role: 'user', content: prompt }],
     }),
   })
@@ -149,11 +245,21 @@ async function callBatchWithRetry(
       const msg: string = err?.message ?? ''
 
       const is429 = msg.includes('429')
-      const is503 = msg.includes('503')
-      if (!is429 && !is503) throw err  // non-retryable (404, auth error, etc.)
+      // 500/502/503/504 are all transient upstream/gateway errors (e.g. a
+      // Cloudflare 504 in front of api.openai.com under load) — retryable,
+      // not permanent failures. Only 504 was actually seen in practice, but
+      // its siblings fail the exact same way and deserve the same treatment.
+      const isGatewayError = /\b(500|502|503|504)\b/.test(msg)
+      if (!is429 && !isGatewayError) throw err  // non-retryable (404, auth error, etc.)
 
-      // Daily quota exhausted — no point retrying today
-      if (msg.includes('PerDay') || msg.includes('per_day') || msg.includes('exceeded your current quota')) {
+      // Quota/credits exhausted — retrying won't help, fail immediately
+      if (
+        msg.includes('PerDay') || msg.includes('per_day') ||
+        msg.includes('exceeded your current quota') ||
+        msg.includes('RESOURCE_EXHAUSTED') ||
+        msg.includes('credits are depleted') ||
+        msg.includes('prepayment')
+      ) {
         throw new DailyQuotaExhaustedError()
       }
 
@@ -165,7 +271,8 @@ async function callBatchWithRetry(
         ? Math.max(apiSuggestedSecs + 5, 35) * 1000
         : Math.max(apiSuggestedSecs + 5, 10) * 1000
 
-      console.warn(`[leadValidation] Attempt ${attempt + 1} failed (${is429 ? '429' : '503'}), retrying in ${waitMs / 1000}s…`)
+      const label = is429 ? '429' : (msg.match(/\b(500|502|503|504)\b/)?.[1] ?? 'gateway error')
+      console.warn(`[leadValidation] Attempt ${attempt + 1} failed (${label}), retrying in ${waitMs / 1000}s…`)
       await new Promise((r) => setTimeout(r, waitMs))
     }
   }
@@ -191,13 +298,22 @@ export async function validateLeads(
 
     const batchInput = batch.map((lead) => {
       const research = lead.id ? researchMap.get(lead.id) : undefined
-      const extra = research
-        ? [
-            research.industry     ? `Industry: ${research.industry}` : null,
-            research.summary      ? `Summary: ${research.summary.slice(0, 120)}` : null,
-            research.employeeCount ? `Employees: ${research.employeeCount}` : null,
-          ].filter(Boolean).join(' | ')
-        : undefined
+      // Use lead-level enrichment fields (denormalized) — fall back to research record
+      const teamSize       = lead.teamSize ?? research?.employeeCount
+      const turnover       = lead.annualTurnover ?? research?.annualTurnover
+      const industry       = lead.industry ?? research?.industry
+      const summary        = research?.summary
+      const decisionMaker  = lead.decisionMaker ?? research?.decisionMaker
+
+      const extra = [
+        industry       ? `Industry: ${industry}` : null,
+        summary        ? `Summary: ${summary.slice(0, 120)}` : null,
+        teamSize       ? `Employees: ${teamSize}${lead.teamSizeVerified === false ? ' (estimated)' : lead.teamSizeVerified ? ' (verified)' : ''}` : null,
+        turnover       ? `Annual Turnover: ${turnover}${lead.turnoverVerified === false ? ' (estimated)' : lead.turnoverVerified ? ' (verified)' : ''}` : null,
+        decisionMaker  ? `Decision Maker: ${decisionMaker}` : null,
+        lead.companyType ? `Company Type: ${lead.companyType}` : null,
+        lead.cin       ? `CIN: ${lead.cin}` : null,
+      ].filter(Boolean).join(' | ') || undefined
 
       return {
         leadId:   lead.id!,

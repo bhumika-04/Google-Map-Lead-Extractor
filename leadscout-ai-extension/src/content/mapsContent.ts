@@ -10,7 +10,7 @@ const MSG = {
   GET_STATUS:         'GET_STATUS',
   CONTENT_READY:      'CONTENT_READY',
 } as const
-import { extractVisibleCards, buildLead, extractResultPanel, extractDetailPanelData } from './mapsExtractor'
+import { extractVisibleCards, buildLead, extractResultPanel, extractDetailPanelData, extractSingleBusinessFromPlacePage } from './mapsExtractor'
 import { AutoScroller } from './autoScroller'
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -127,9 +127,39 @@ function startCapture(payload: MapsStartCapturePayload) {
   captureActive = true
 
   // Wait for Maps results panel to appear before starting scroll
-  waitForPanel().then(() => {
+  waitForPanel().then((foundPanel) => {
     if (!captureActive) return
 
+    // Google Maps sometimes redirects a search straight to a single business's
+    // /maps/place/ page instead of a results list (e.g. the search text closely
+    // matches one business's exact listed name). No list means captureVisible()
+    // would find zero cards and the session would silently end with nothing —
+    // capture that one exact match directly instead of wasting the attempt.
+    //
+    // IMPORTANT: only take this path when we can POSITIVELY confirm we're on a
+    // place page via the URL. A missing panel after the wait window can simply
+    // mean a normal results list is loading slowly (common across a long
+    // sequential multi-keyword run) — treating every timeout as "single
+    // business page" was wrongly ending normal searches with 0 leads captured.
+    const isPlacePage = /\/maps\/place\//.test(location.pathname)
+    if (!foundPanel && isPlacePage) {
+      const single = extractSingleBusinessFromPlacePage()
+      if (single) {
+        const key = single.googleMapsUrl || single.companyName
+        if (!capturedUrls.has(key)) {
+          capturedUrls.add(key)
+          const lead = buildLead(single, sessionId!, '', '', '')
+          totalSent++
+          chrome.runtime.sendMessage({ type: MSG.LEAD_FOUND, payload: { lead, sessionId } }).catch(() => {})
+        }
+      }
+      stopCapture(single ? 'end_of_list' : 'no_new_leads')
+      return
+    }
+
+    // Normal results-list search (including the case where the panel just
+    // hadn't rendered yet within the wait window) — proceed as before and let
+    // the scroller keep retrying as Maps finishes rendering.
     captureVisible()
 
     scroller = new AutoScroller(
@@ -144,16 +174,16 @@ function startCapture(payload: MapsStartCapturePayload) {
   })
 }
 
-function waitForPanel(maxWait = 10000): Promise<void> {
+function waitForPanel(maxWait = 10000): Promise<boolean> {
   return new Promise((resolve) => {
     const start = Date.now()
     const check = () => {
       if (extractResultPanel()) {
-        resolve()
+        resolve(true)
         return
       }
       if (Date.now() - start > maxWait) {
-        resolve() // proceed anyway
+        resolve(false) // no results list found — likely a single-business place page
         return
       }
       setTimeout(check, 500)

@@ -9,7 +9,8 @@ import { activityLogRepository } from '@/db/activityLogRepository'
 import type { Lead } from '@/types/lead'
 
 // Maps common CSV column names → Lead field keys
-const FIELD_MAP: Record<string, keyof Lead> = {
+// (exported for reuse by SelectedCsvImport — the Selected Leads quick importer)
+export const FIELD_MAP: Record<string, keyof Lead> = {
   company_name: 'companyName', companyname: 'companyName', company: 'companyName', name: 'companyName', business: 'companyName',
   phone: 'phone', telephone: 'phone', mobile: 'phone', contact: 'phone',
   website: 'website', url: 'website', web: 'website',
@@ -24,7 +25,7 @@ const FIELD_MAP: Record<string, keyof Lead> = {
   google_maps_url: 'googleMapsUrl', googlemapsurl: 'googleMapsUrl', maps_url: 'googleMapsUrl',
 }
 
-function parseCSV(text: string): { headers: string[]; rows: Record<string, string>[] } {
+export function parseCSV(text: string): { headers: string[]; rows: Record<string, string>[] } {
   const lines = text.trim().split(/\r?\n/)
   if (lines.length < 2) return { headers: [], rows: [] }
 
@@ -60,7 +61,7 @@ function parseCSV(text: string): { headers: string[]; rows: Record<string, strin
   return { headers, rows }
 }
 
-function mapRow(row: Record<string, string>, sessionId: number): Omit<Lead, 'id'> | null {
+export function mapRow(row: Record<string, string>, sessionId: number): Omit<Lead, 'id'> | null {
   const mapped: Partial<Lead> = {}
 
   for (const [csvKey, val] of Object.entries(row)) {

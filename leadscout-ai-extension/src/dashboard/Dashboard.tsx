@@ -2,17 +2,25 @@ import React, { useEffect, useState, useCallback } from 'react'
 import Sidebar, { type NavSection } from './components/Sidebar'
 import Topbar from './components/Topbar'
 import SearchConsole from './components/SearchConsole'
+import SearchSessionCards from './components/SearchSessionCards'
 import ProgressCards from './components/ProgressCards'
 import LeadTable from './components/LeadTable'
 import ActivityLogPanel from './components/ActivityLogPanel'
-import SettingsPanel from './components/SettingsPanel'
 import ToastContainer from './components/Toast'
 import LeadDetailPanel from './components/LeadDetailPanel'
 import AnalyticsSection from './components/AnalyticsSection'
 import CsvImportSection from './components/CsvImportSection'
+import SelectedCsvImport from './components/SelectedCsvImport'
+import ExistingClientsSection from './components/ExistingClientsSection'
 import BackupRestoreSection from './components/BackupRestoreSection'
 import ResearchPage from './components/ResearchPage'
+import CompanyIntelligencePage from './components/CompanyIntelligencePage'
+import LinkedInIntelligencePage from './components/LinkedInIntelligencePage'
+import MarketsPage from './components/MarketsPage'
 import ValidationPanel from './components/ValidationPanel'
+import BatchCampaignPanel from './components/BatchCampaignPanel'
+import FollowUpPanel from './components/FollowUpPanel'
+import NurturePanel from './components/NurturePanel'
 import { useSettingsStore } from '@/state/useSettingsStore'
 import { useSearchStore } from '@/state/useSearchStore'
 
@@ -22,8 +30,12 @@ import { toast } from '@/state/useToastStore'
 import { MSG } from '@/types/messages'
 import type { ProgressUpdatePayload } from '@/types/messages'
 import { researchJobRepository } from '@/db/researchJobRepository'
+import { searchEvidenceRepository } from '@/db/searchEvidenceRepository'
+import { sourcePageRepository } from '@/db/sourcePageRepository'
 import { searchSessionRepository } from '@/db/searchSessionRepository'
 import { leadRepository } from '@/db/leadRepository'
+import { existingClientRepository } from '@/db/existingClientRepository'
+import { fetchExistingClients } from '@/services/sqlSyncService'
 import StatusBadge from './components/StatusBadge'
 import { timeAgo } from '@/utils/date'
 import { activityLogRepository } from '@/db/activityLogRepository'
@@ -31,16 +43,61 @@ import { activityLogRepository } from '@/db/activityLogRepository'
 export default function Dashboard() {
   const [section, setSection] = useState<NavSection>('overview')
   const [researchCount, setResearchCount] = useState(0)
+  // Total leads in IndexedDB — the sidebar badge. Deliberately NOT leads.length
+  // from the store: that reflects whatever filter the current page loaded
+  // (e.g. only 'selected' leads), which made the badge look like leads vanished
+  // whenever the user switched pages.
+  const [totalLeadCount, setTotalLeadCount] = useState(0)
+  const refreshTotalLeadCount = useCallback(() => {
+    leadRepository.getAll().then((all) => setTotalLeadCount(all.length)).catch(() => {})
+  }, [])
 
-  const { load: loadSettings } = useSettingsStore()
+  const { load: loadSettings, settings } = useSettingsStore()
   const { loadSessions } = useSearchStore()
+
+  // Apply theme class to <html> whenever setting changes
+  useEffect(() => {
+    const html = document.documentElement
+    if (settings.theme === 'light') {
+      html.classList.add('light')
+    } else {
+      html.classList.remove('light')
+    }
+  }, [settings.theme])
   const { loadLeads, leads, closeDetail, detailLead } = useLeadStore()
-  const { updateProgress, appendLog, setStatus, status: captureStatus, totalCaptured: captureCaptured } = useCaptureStore()
+  const { updateProgress, appendLog, setStatus, setPipelinePhase, status: captureStatus, totalCaptured: captureCaptured } = useCaptureStore()
+
+  // Sidebar badge — refresh on mount and every 15s (captures/syncs change it)
+  useEffect(() => {
+    refreshTotalLeadCount()
+    const badgeInterval = setInterval(refreshTotalLeadCount, 15000)
+    return () => clearInterval(badgeInterval)
+  }, [refreshTotalLeadCount])
 
   useEffect(() => {
     loadSettings()
     loadSessions()
     researchJobRepository.countPending().then(setResearchCount)
+
+    // Pull the existing-clients block list down so the outreach hard-block check
+    // works even if the user hasn't opened the "Existing Clients" page this session.
+    fetchExistingClients().then((remote) => {
+      if (remote.length === 0) return
+      existingClientRepository.replaceAll(
+        remote.map((r) => ({
+          mssqlId: r.mssqlId,
+          companyName: r.companyName,
+          normalizedName: r.normalizedName,
+          city: r.city,
+          phone: r.phone,
+          normalizedPhone: r.normalizedPhone,
+          contactName: r.contactName,
+          email: r.email,
+          notes: r.notes,
+          uploadedAt: r.uploadedAt,
+        }))
+      )
+    }).catch(() => {})
 
     // MSSQL is the single source of truth — sync on every dashboard open.
     // If the database was cleared, this will clear local data too.
@@ -64,6 +121,7 @@ export default function Dashboard() {
       const p = msg.payload as ProgressUpdatePayload
       updateProgress(p.totalCaptured, p.duplicatesSkipped, p.message)
       setStatus(p.status as any)
+      if (p.pipelinePhase !== undefined) setPipelinePhase(p.pipelinePhase as any)
       appendLog(p.message ?? `Progress: ${p.totalCaptured} captured`)
       if (p.status === 'completed') {
         toast.success(`Capture complete — ${p.totalCaptured} leads captured`)
@@ -105,7 +163,7 @@ export default function Dashboard() {
       <Sidebar
         active={section}
         onChange={setSection}
-        leadCount={leads.length}
+        leadCount={totalLeadCount}
         researchCount={researchCount}
       />
 
@@ -119,22 +177,30 @@ export default function Dashboard() {
               <div className="flex flex-col gap-5">
                 <SearchConsole />
                 <ProgressCards />
+                <SearchSessionCards onNavigate={setSection} />
               </div>
             )}
             {section === 'leads'    && <LeadTable title="All Leads" />}
             {section === 'selected' && (
               <div className="flex flex-col flex-1 min-h-0 gap-5">
                 <ValidationPanel />
+                <SelectedCsvImport />
                 <LeadTable title="Selected Leads" filterStatus="selected" />
               </div>
             )}
-            {section === 'research'         && <ResearchQueueSection onNavigateToSettings={() => setSection('settings')} />}
+            {section === 'batch_campaigns'   && <BatchCampaignPanel />}
+            {section === 'research'         && <ResearchQueueSection />}
             {section === 'research_results' && <ResearchPage />}
-            {section === 'analytics' && <AnalyticsSection />}
-            {section === 'import'    && <CsvImportSection />}
-            {section === 'backup'    && <BackupRestoreSection />}
-            {section === 'logs'      && <ActivityLogPanel />}
-            {section === 'settings'  && <SettingsPanel />}
+            {section === 'company_intelligence' && <CompanyIntelligencePage />}
+            {section === 'linkedin_intelligence' && <LinkedInIntelligencePage />}
+            {section === 'markets' && <MarketsPage onNavigate={setSection} />}
+            {section === 'followups'  && <FollowUpPanel />}
+            {section === 'nurture'    && <NurturePanel />}
+            {section === 'analytics'  && <AnalyticsSection />}
+            {section === 'import'     && <CsvImportSection />}
+            {section === 'existing_clients' && <ExistingClientsSection />}
+            {section === 'backup'     && <BackupRestoreSection />}
+            {section === 'logs'       && <ActivityLogPanel />}
           </main>
 
           <LeadDetailPanel />
@@ -209,10 +275,12 @@ function OverviewSection({ onNavigate }: { onNavigate: (s: NavSection) => void }
         <div className="col-span-1 bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-2">
           <h3 className="text-sm font-semibold text-white mb-3">Quick Actions</h3>
           <QuickAction icon="⌕" label="New Search" onClick={() => onNavigate('search')} primary />
+          <QuickAction icon="⊞" label="Batch Campaigns" onClick={() => onNavigate('batch_campaigns')} />
           <QuickAction icon="☰" label={`View All Leads (${leads.length})`} onClick={() => onNavigate('leads')} />
           <QuickAction icon="✓" label={`Selected (${selectedLeads})`} onClick={() => onNavigate('selected')} />
           <QuickAction icon="⚗" label="Research Queue" onClick={() => onNavigate('research')} />
-          <QuickAction icon="≡" label="Activity Logs" onClick={() => onNavigate('logs')} />
+          <QuickAction icon="⏰" label="Follow-Ups" onClick={() => onNavigate('followups')} />
+          <QuickAction icon="◎" label="Nurture Sequences" onClick={() => onNavigate('nurture')} />
           {/* Keyboard hint */}
           <div className="pt-2 border-t border-gray-800 text-xs text-gray-700 space-y-0.5">
             <div><kbd className="bg-gray-800 px-1 rounded text-gray-600">/</kbd> Search &nbsp; <kbd className="bg-gray-800 px-1 rounded text-gray-600">l</kbd> Leads &nbsp; <kbd className="bg-gray-800 px-1 rounded text-gray-600">o</kbd> Overview</div>
@@ -296,7 +364,7 @@ function QuickAction({ icon, label, onClick, primary }: { icon: string; label: s
 
 // ─── Research Queue Section ───────────────────────────────────────────────────
 
-function ResearchQueueSection({ onNavigateToSettings }: { onNavigateToSettings: () => void }) {
+function ResearchQueueSection() {
   const [jobs, setJobs] = useState<Awaited<ReturnType<typeof researchJobRepository.getAll>>>([])
   const [loading, setLoading] = useState(true)
   const [running, setRunning] = useState(false)
@@ -305,19 +373,14 @@ function ResearchQueueSection({ onNavigateToSettings }: { onNavigateToSettings: 
 
   useEffect(() => { if (!loaded) loadSettings() }, [loaded, loadSettings])
 
-  // Check where the API key comes from
+  // Check if any API key is available (settings already merged backend keys on load)
   useEffect(() => {
     if (!loaded) return
-    const hasExtensionKey = settings.researchProvider === 'gemini' ? !!settings.geminiApiKey
+    const hasKey = settings.researchProvider === 'gemini' ? !!settings.geminiApiKey
       : settings.researchProvider === 'openai' ? !!settings.openAiApiKey
       : !!settings.anthropicApiKey
-    if (hasExtensionKey) { setApiKeySource('extension'); return }
-    // Check if backend has the key
-    fetch('http://localhost:5150/api/config', { signal: AbortSignal.timeout(2000) })
-      .then((r) => r.json())
-      .then((cfg: any) => setApiKeySource(cfg?.hasKey ? 'backend' : 'none'))
-      .catch(() => setApiKeySource('none'))
-  }, [loaded, settings.openAiApiKey, settings.anthropicApiKey, settings.researchProvider])
+    setApiKeySource(hasKey ? 'backend' : 'none')
+  }, [loaded, settings.geminiApiKey, settings.openAiApiKey, settings.anthropicApiKey, settings.researchProvider])
 
   async function refreshJobs() {
     const j = await researchJobRepository.getAll()
@@ -331,6 +394,41 @@ function ResearchQueueSection({ onNavigateToSettings }: { onNavigateToSettings: 
     return () => clearInterval(interval)
   }, [])
 
+  // While a job is running, poll its evidence/source-page progress: current
+  // search query, the source currently being opened, and completed/failed counts.
+  const [activity, setActivity] = useState<{
+    companyName: string
+    query?: string
+    currentSourceUrl?: string
+    completed: number
+    failed: number
+  } | null>(null)
+
+  useEffect(() => {
+    const runningJob = jobs.find((j) => j.status === 'running')
+    if (!runningJob) { setActivity(null); return }
+
+    let cancelled = false
+    async function poll() {
+      const [evidenceRows, pages] = await Promise.all([
+        searchEvidenceRepository.getByLeadId(runningJob.leadId),
+        sourcePageRepository.getByLeadId(runningJob.leadId),
+      ])
+      if (cancelled) return
+      const current = pages.find((p) => p.status === 'pending')
+      setActivity({
+        companyName: runningJob.companyName,
+        query: evidenceRows[0]?.query,
+        currentSourceUrl: current?.url,
+        completed: pages.filter((p) => p.status === 'extracted').length,
+        failed: pages.filter((p) => p.status === 'failed').length,
+      })
+    }
+    poll()
+    const interval = setInterval(poll, 3000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [jobs])
+
   async function handleRunNow() {
     if (apiKeySource === 'none') {
       toast.error('No API key found — add it in Settings or ensure the DeepLead API is running')
@@ -341,7 +439,7 @@ function ResearchQueueSection({ onNavigateToSettings }: { onNavigateToSettings: 
     try {
       const res: any = await chrome.runtime.sendMessage({ type: MSG.TRIGGER_RESEARCH })
       if (res?.ok === false && res?.reason === 'no_api_key') {
-        toast.error(`API key missing in Settings → AI Research (${res.provider})`)
+        toast.error(`API key missing — add ${res.provider} key to appsettings.json and restart backend`)
       } else {
         toast.success('Research started — status updates every 3 seconds')
         setTimeout(refreshJobs, 1500)
@@ -400,15 +498,9 @@ function ResearchQueueSection({ onNavigateToSettings }: { onNavigateToSettings: 
       {loaded && apiKeySource === 'none' && (
         <div className="flex items-center gap-3 bg-yellow-950/60 border border-yellow-800/60 rounded-xl px-4 py-3">
           <span className="text-yellow-400 text-lg shrink-0">⚠</span>
-          <div className="flex-1 text-xs text-yellow-300">
-            <span className="font-semibold">No API key found.</span> Add your OpenAI key in Settings, or start the DeepLead API (it holds the key automatically).
+          <div className="text-xs text-yellow-300">
+            <span className="font-semibold">No API key found.</span> Add your Gemini / OpenAI key to <span className="font-mono">DeepLeadApi/appsettings.json</span> and restart the backend.
           </div>
-          <button
-            onClick={onNavigateToSettings}
-            className="text-xs px-3 py-1.5 bg-yellow-700 hover:bg-yellow-600 text-white rounded-lg transition-colors shrink-0"
-          >
-            Settings
-          </button>
         </div>
       )}
       {loaded && apiKeySource === 'backend' && (
@@ -423,12 +515,20 @@ function ResearchQueueSection({ onNavigateToSettings }: { onNavigateToSettings: 
 
       {/* Live research indicator */}
       {runningCount > 0 && (
-        <div className="flex items-center gap-3 bg-purple-950/60 border border-purple-700/60 rounded-xl px-4 py-3 animate-pulse">
-          <span className="text-purple-400 text-lg shrink-0">⚗</span>
-          <div className="text-xs text-purple-300">
-            <span className="font-semibold">AI research in progress…</span>
-            <span className="text-purple-500 ml-1.5">Fetching website, analysing with {settings.researchProvider === 'openai' ? 'GPT' : 'Claude'}, extracting contacts</span>
+        <div className="flex flex-col gap-1.5 bg-purple-950/60 border border-purple-700/60 rounded-xl px-4 py-3">
+          <div className="flex items-center gap-3 animate-pulse">
+            <span className="text-purple-400 text-lg shrink-0">⚗</span>
+            <div className="text-xs text-purple-300">
+              <span className="font-semibold">Evidence research in progress{activity ? `: ${activity.companyName}` : '…'}</span>
+            </div>
           </div>
+          {activity && (
+            <div className="pl-8 text-xs text-purple-400 space-y-0.5">
+              {activity.query && <div>Search query: <span className="text-purple-300">"{activity.query}"</span></div>}
+              {activity.currentSourceUrl && <div>Opening: <span className="text-purple-300 break-all">{activity.currentSourceUrl}</span></div>}
+              <div>Sources visited: <span className="text-green-400">{activity.completed} completed</span>{activity.failed > 0 && <span className="text-red-400 ml-2">{activity.failed} failed</span>}</div>
+            </div>
+          )}
         </div>
       )}
 

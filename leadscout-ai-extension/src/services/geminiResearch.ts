@@ -1,7 +1,7 @@
 import type { ResearchResult } from '@/types/research'
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
-const DEFAULT_MODEL = 'gemini-2.0-flash'
+const DEFAULT_MODEL = 'gemini-flash-latest'
 
 interface ExtractedData {
   // Contact
@@ -41,38 +41,27 @@ interface ExtractedData {
 }
 
 function buildPrompt(companyName: string, city: string, extraContext: string): string {
-  return `You are a B2B business intelligence analyst. Use Google Search to deeply research the Indian company below. Search across their website, IndiaMART, LinkedIn, Naukri, news portals, and export directories.
+  return `You are a B2B business intelligence analyst. Extract everything you can about the Indian company below from the pre-fetched source data provided. For most fields, only use data explicitly present in the sources — do NOT invent contact details, names, URLs, or client lists. EXCEPTION: for painPoints specifically, you MUST always infer 2-4 operational pain points from the company's industry, size, and business type even if not stated in the source — this is AI analysis, not extraction.
 
 COMPANY: "${companyName}"
 CITY: ${city}
 
-ADDITIONAL CONTEXT (pre-fetched data — use alongside your searches):
+SOURCE DATA (website, Google search, IndiaMART, JustDial — already fetched):
 ${extraContext || 'None'}
 
-SEARCH SEQUENCE (run ALL of these):
-1. Search: "${companyName}" "${city}" — find official website, IndiaMART, JustDial
-2. Search: "${companyName}" CEO OR "Managing Director" OR Founder OR Director OR Owner — get decision maker
-3. Search: "${companyName}" site:linkedin.com — get LinkedIn company page AND personal profiles of key people
-4. Search: "${companyName}" clients OR customers OR "our clients" OR "trusted by" — find client names
-5. Search: "${companyName}" ISO OR GMP OR certification OR "FSSAI" OR "BIS" — get certifications
-6. Search: "${companyName}" revenue OR turnover OR "annual turnover" OR employees — financials
-7. Search: "${companyName}" Tally OR SAP OR ERP OR software OR "inventory management" — find current software
-8. Search: "${companyName}" hiring OR Naukri OR jobs OR "we are expanding" OR "new branch" — expansion signals
-9. Search: "${companyName}" export OR "exports to" OR "export house" OR foreign — export markets
-10. Search: "${companyName}" manufacturer OR trader OR distributor OR "service provider" — business type
-
 FIELD RULES:
-- decisionMaker: Owner > CEO > MD > Director > Founder. Full name only. If multiple, pick highest authority.
-- decisionMakerLinkedIn: Personal LinkedIn URL of the decision maker (linkedin.com/in/...), NOT the company page. Search their name + company on LinkedIn.
+- decisionMaker: Owner > CEO > MD > Director > Founder. Full name only. If multiple, pick highest authority. Null if not found.
+- decisionMakerLinkedIn: Personal LinkedIn URL of the decision maker (linkedin.com/in/...), NOT the company page. Null if not found.
 - email: Prefer business domain emails (info@company.com). If ONLY webmail (gmail/yahoo) is found on the company's own website, include it — many Indian SMBs use Gmail as their official contact. NEVER invent an email.
 - supplierBuyerType: "manufacturer" = they make/produce products; "trader" = they buy & resell; "distributor" = authorized distributor; "service_provider" = pure service; "mixed" = both.
-- painPoints: Based on their industry, size, and type — list 2-4 likely operational pain points they would face (e.g. "Manual stock tracking across multiple warehouses", "Compliance documentation for pharma clients"). Be specific to their actual business.
-- currentSoftware: List any software/ERP/tools found in job listings, website, or LinkedIn (e.g. Tally, SAP, Busy, Zoho, Excel). "null" if not found.
-- expansionSignals: Any evidence of growth — active job listings count, new branch opening, new product launch, recent news. E.g. "Hiring 8 positions on Naukri (Oct 2024)", "New warehouse in Pune announced Jan 2025".
-- exportMarkets: Countries they export to. Only include if explicitly mentioned.
-- majorClients: Every named company mentioned as their client/customer.
-- teamMembers: Every named person with their role across all sources.
-- certifications: All quality/compliance certifications found.
+- annualTurnover: Look for "Annual Turnover", "Revenue", "Turnover" in IndiaMART, Zaubacorp, or any source. Copy the exact string (e.g. "₹25 Lakh - ₹1 Cr", "5 Lakh or Less", "25-100 Cr"). If not explicitly stated but employeeCount is known, estimate: 1-10 employees → "Below 1 Cr (est.)", 10-50 → "1-10 Cr (est.)", 50-200 → "10-50 Cr (est.)". Null only if both source data AND employee count are completely unavailable.
+- painPoints: ALWAYS return 2-4 specific pain points inferred from their industry and company type (e.g. printing company: "Managing ink/paper cost volatility", "Meeting tight delivery deadlines during peak season"). You MUST populate this — it is AI analysis, not source extraction.
+- currentSoftware: List any software/ERP/tools found in job listings, website, or LinkedIn. Return [] if not found.
+- expansionSignals: Any evidence of growth — active job listings count, new branch opening, new product launch, recent news. Return [] if none.
+- exportMarkets: Countries they export to. Only include if explicitly mentioned. Return [] otherwise.
+- majorClients: Every named company mentioned as their client/customer. Return [] if none found.
+- teamMembers: Every named person with their role across all sources. Return [] if none found.
+- certifications: All quality/compliance certifications found. Return [] if none.
 
 Return ONLY valid JSON (no markdown, no explanation):
 {
@@ -128,10 +117,10 @@ export async function callGeminiResearch(
           role: 'user',
           parts: [{ text: buildPrompt(companyName, city, extraContext) }],
         }],
-        tools: [{ google_search: {} }],
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 4096,
+          maxOutputTokens: 8192,
+          thinkingConfig: { thinkingBudget: 0 },
         },
       }),
     })

@@ -22,7 +22,7 @@ export default function Popup() {
   }, [])
 
   function openDashboard() {
-    chrome.tabs.create({ url: chrome.runtime.getURL('dashboard/dashboard.html') })
+    chrome.tabs.create({ url: chrome.runtime.getURL('dashboard/dashboard.html') }).catch(() => {})
     window.close()
   }
 

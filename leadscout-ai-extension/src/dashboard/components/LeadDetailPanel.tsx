@@ -130,8 +130,18 @@ export default function LeadDetailPanel() {
             <div className="flex items-center gap-2 mt-1 flex-wrap">
               {lead.category && <p className="text-xs text-gray-400">{lead.category}</p>}
               <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-xs font-semibold ${sColor}`}>
-                {score} <span className="font-normal opacity-75">{sLabel}</span>
+                {score} <span className="font-normal opacity-75">Map</span>
               </span>
+              {lead.icpScore !== undefined && (
+                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-xs font-semibold ${
+                  lead.icpScore >= 80 ? 'bg-green-900/60 border-green-700 text-green-300' :
+                  lead.icpScore >= 60 ? 'bg-blue-900/60 border-blue-700 text-blue-300' :
+                  lead.icpScore >= 50 ? 'bg-yellow-900/60 border-yellow-700 text-yellow-300' :
+                  'bg-red-900/60 border-red-800 text-red-400'
+                }`}>
+                  {lead.icpScore} <span className="font-normal opacity-75">ICP</span>
+                </span>
+              )}
             </div>
           </div>
           <button
@@ -168,6 +178,69 @@ export default function LeadDetailPanel() {
               ))}
             </div>
           </section>
+
+          {/* ICP Scoring */}
+          {lead.icpScore !== undefined && (
+            <section className="space-y-2">
+              <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide">ICP Score</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className={`rounded-lg px-3 py-2.5 border ${
+                  lead.icpScore >= 80 ? 'bg-green-950/40 border-green-800/60' :
+                  lead.icpScore >= 60 ? 'bg-blue-950/40 border-blue-800/60' :
+                  lead.icpScore >= 50 ? 'bg-yellow-950/40 border-yellow-800/60' :
+                  'bg-red-950/40 border-red-900/60'
+                }`}>
+                  <div className="text-gray-500 text-xs mb-0.5">Score</div>
+                  <div className={`text-xl font-bold ${
+                    lead.icpScore >= 80 ? 'text-green-300' :
+                    lead.icpScore >= 60 ? 'text-blue-300' :
+                    lead.icpScore >= 50 ? 'text-yellow-300' : 'text-red-400'
+                  }`}>{lead.icpScore}<span className="text-sm font-normal opacity-60">/100</span></div>
+                </div>
+                {lead.icpStatus && (
+                  <div className="bg-gray-800 rounded-lg px-3 py-2.5 border border-gray-700">
+                    <div className="text-gray-500 text-xs mb-0.5">Status</div>
+                    <div className={`text-sm font-semibold capitalize ${
+                      lead.icpStatus === 'high_fit' ? 'text-green-400' :
+                      lead.icpStatus === 'good_fit' ? 'text-blue-400' :
+                      lead.icpStatus === 'low_priority' ? 'text-yellow-400' : 'text-gray-500'
+                    }`}>{lead.icpStatus.replace('_', ' ')}</div>
+                  </div>
+                )}
+              </div>
+              {lead.icpScoreBreakdown && (
+                <div className="bg-gray-800/60 rounded-lg px-3 py-2 border border-gray-700/60">
+                  <div className="text-gray-600 text-xs mb-1">Score Breakdown</div>
+                  <div className="text-xs text-gray-400 font-mono">{lead.icpScoreBreakdown}</div>
+                </div>
+              )}
+              {lead.icpReason && (
+                <div className={`text-xs rounded-lg px-3 py-2.5 border ${
+                  lead.validationStatus === 'not_relevant'
+                    ? 'bg-red-950/30 border-red-900/50 text-red-300'
+                    : 'bg-green-950/30 border-green-900/50 text-green-300'
+                }`}>
+                  {lead.icpReason}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* Legacy validation reason (fallback if no icpReason) */}
+          {lead.validationReason && !lead.icpReason && (
+            <section>
+              <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
+                Why {lead.validationStatus === 'not_relevant' ? 'Rejected' : 'Selected'}
+              </div>
+              <div className={`text-xs rounded-lg px-3 py-2.5 border ${
+                lead.validationStatus === 'not_relevant'
+                  ? 'bg-red-950/30 border-red-900/50 text-red-300'
+                  : 'bg-green-950/30 border-green-900/50 text-green-300'
+              }`}>
+                {lead.validationReason}
+              </div>
+            </section>
+          )}
 
           {/* Rating */}
           {(lead.rating != null || lead.reviewCount != null) && (
@@ -249,13 +322,159 @@ export default function LeadDetailPanel() {
             )}
           </section>
 
+          {/* Enrichment fields */}
+          {(lead.industry || lead.companyType || lead.teamSize || lead.annualTurnover || lead.decisionMaker || lead.cin || lead.uan) && (
+            <section className="space-y-2">
+              <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Company Profile</div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                {lead.industry       && <InfoCell label="Industry"         value={lead.industry} />}
+                {lead.companyType    && <InfoCell label="Company Type"     value={lead.companyType} />}
+                {lead.teamSize && (
+                  <InfoCell
+                    label="Team Size"
+                    value={lead.teamSize}
+                    verified={lead.teamSizeVerified}
+                  />
+                )}
+                {lead.annualTurnover && (
+                  <InfoCell
+                    label="Annual Turnover"
+                    value={lead.annualTurnover}
+                    verified={lead.turnoverVerified}
+                  />
+                )}
+                {lead.cin && (
+                  <div className="bg-gray-800 rounded-lg px-3 py-2 col-span-2">
+                    <div className="text-gray-600 mb-0.5">CIN</div>
+                    <div className="text-gray-200 font-mono text-xs">{lead.cin}</div>
+                  </div>
+                )}
+                {lead.uan && (
+                  <div className="bg-gray-800 rounded-lg px-3 py-2 col-span-2">
+                    <div className="text-gray-600 mb-0.5">UAN (EPFO)</div>
+                    <div className="text-gray-200 font-mono text-xs">{lead.uan}</div>
+                  </div>
+                )}
+                {lead.decisionMaker && (
+                  <div className="bg-gray-800 rounded-lg px-3 py-2 col-span-2">
+                    <div className="text-gray-600 mb-0.5">Directors / Owner</div>
+                    <div className="text-gray-200 font-medium">{lead.decisionMaker}</div>
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* LinkedIn Intelligence */}
+          {(lead.linkedinUrl || lead.linkedinFollowers || lead.linkedinAbout || lead.linkedinSpecialties || lead.linkedinPeople || lead.linkedinRecentPost) && (
+            <section className="space-y-2">
+              <div className="flex items-center gap-2">
+                <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide">LinkedIn Intel</div>
+                {lead.linkedinUrl && (
+                  <a
+                    href={lead.linkedinUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                    title="Open LinkedIn page"
+                  >
+                    ↗ View page
+                  </a>
+                )}
+              </div>
+
+              {/* Followers + Specialties row */}
+              {(lead.linkedinFollowers || lead.linkedinSpecialties) && (
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {lead.linkedinFollowers && (
+                    <div className="bg-blue-950/30 border border-blue-800/40 rounded-lg px-3 py-2">
+                      <div className="text-blue-600 mb-0.5">Followers</div>
+                      <div className="text-blue-200 font-semibold">{lead.linkedinFollowers}</div>
+                    </div>
+                  )}
+                  {lead.linkedinSpecialties && (
+                    <div className={`bg-gray-800 rounded-lg px-3 py-2 ${!lead.linkedinFollowers ? 'col-span-2' : ''}`}>
+                      <div className="text-gray-600 mb-1">Specialties</div>
+                      <div className="flex flex-wrap gap-1">
+                        {lead.linkedinSpecialties.split(',').map((s) => s.trim()).filter(Boolean).map((s) => (
+                          <span key={s} className="px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded text-xs">{s}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* About */}
+              {lead.linkedinAbout && (
+                <div className="bg-gray-800 rounded-lg px-3 py-2 text-xs">
+                  <div className="text-gray-600 mb-1">About</div>
+                  <div className="text-gray-300 leading-relaxed line-clamp-4">{lead.linkedinAbout}</div>
+                </div>
+              )}
+
+              {/* People / Key employees */}
+              {lead.linkedinPeople && (() => {
+                try {
+                  const people: { name: string; title: string; profileUrl?: string }[] = JSON.parse(lead.linkedinPeople)
+                  if (!people.length) return null
+                  return (
+                    <div className="bg-gray-800 rounded-lg px-3 py-2 text-xs space-y-1.5">
+                      <div className="text-gray-600 mb-1">People</div>
+                      {people.map((p, i) => (
+                        <div key={i} className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            {p.profileUrl ? (
+                              <a
+                                href={p.profileUrl.startsWith('http') ? p.profileUrl : `https://linkedin.com${p.profileUrl}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-blue-400 hover:text-blue-300 font-medium truncate block transition-colors"
+                              >
+                                {p.name}
+                              </a>
+                            ) : (
+                              <span className="text-gray-200 font-medium">{p.name}</span>
+                            )}
+                            <span className="text-gray-500">{p.title}</span>
+                          </div>
+                          {p.profileUrl && (
+                            <span className="text-gray-600 shrink-0 text-xs">↗</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                } catch { return null }
+              })()}
+
+              {/* Recent post */}
+              {lead.linkedinRecentPost && (() => {
+                try {
+                  const post: { date: string; snippet: string } = JSON.parse(lead.linkedinRecentPost)
+                  return (
+                    <div className="bg-gray-800/60 border border-gray-700/60 rounded-lg px-3 py-2 text-xs">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-gray-600">Recent post</span>
+                        <span className="text-gray-500">{post.date}</span>
+                      </div>
+                      <div className="text-gray-400 leading-relaxed line-clamp-3">{post.snippet}</div>
+                    </div>
+                  )
+                } catch { return null }
+              })()}
+            </section>
+          )}
+
           {/* Search metadata */}
           <section className="space-y-2">
             <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Search Info</div>
             <div className="grid grid-cols-2 gap-2 text-xs">
               <InfoCell label="City" value={lead.city} />
               <InfoCell label="Keyword" value={lead.keyword} />
-              <InfoCell label="Confidence" value={`${Math.round(lead.confidence * 100)}%`} />
+              <InfoCell label="Map Score" value={`${score} — ${sLabel}`} />
               <InfoCell label="Source" value="Google Maps" />
             </div>
           </section>
@@ -438,10 +657,22 @@ export default function LeadDetailPanel() {
   )
 }
 
-function InfoCell({ label, value }: { label: string; value: string }) {
+function InfoCell({ label, value, verified }: { label: string; value: string; verified?: boolean }) {
   return (
     <div className="bg-gray-800 rounded-lg px-3 py-2">
-      <div className="text-gray-600 mb-0.5">{label}</div>
+      <div className="flex items-center gap-1.5 mb-0.5">
+        <span className="text-gray-600">{label}</span>
+        {verified === false && (
+          <span className="text-xs px-1 py-0.5 rounded bg-yellow-900/40 border border-yellow-700/40 text-yellow-600 font-medium leading-none">
+            Est.
+          </span>
+        )}
+        {verified === true && (
+          <span className="text-xs px-1 py-0.5 rounded bg-green-900/40 border border-green-700/40 text-green-600 font-medium leading-none">
+            ✓
+          </span>
+        )}
+      </div>
       <div className="text-gray-200 font-medium truncate">{value}</div>
     </div>
   )

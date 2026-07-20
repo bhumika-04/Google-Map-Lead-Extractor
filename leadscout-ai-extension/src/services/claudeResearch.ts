@@ -26,6 +26,9 @@ interface ExtractedData {
   certifications?: string[]
   majorClients?: string[]
   teamMembers?: { name: string; role: string }[]
+  painPoints?: string[]
+  expansionSignals?: string[]
+  currentSoftware?: string[]
   confidence: number
 }
 
@@ -38,8 +41,11 @@ RULES:
 3. For teamMembers — extract EVERY named person with their role from ANY source: website About/Team page, IndiaMART CEO field, Zaubacorp directors list, LinkedIn people, Google snippets with titles like "Managing Director", "Director", "Founder", "Owner", "HR", "Sales".
 4. For email — prefer business domain emails (e.g. hr@company.com). If ONLY webmail (gmail/yahoo) is found in "Website content" or "Emails found on website", include it — many Indian SMBs use Gmail as their primary business email. NEVER invent an email.
 5. decisionMaker — Owner, Proprietor, Managing Director, CEO, Founder, Director, Partner. Use IndiaMART "Company CEO" or Zaubacorp directors list first.
-6. For annualTurnover — look in Zaubacorp, IndiaMART, AmbitionBox pages for "Annual Turnover", "Revenue", "Turnover" fields. Also look in Google snippets.
-7. Do NOT invent data. Use null if not found.
+6. For annualTurnover — look in Zaubacorp, IndiaMART, AmbitionBox pages for "Annual Turnover", "Revenue", "Turnover" fields. Copy the exact string (e.g. "₹25 Lakh - ₹1 Cr", "5 Lakh or Less", "25-100 Cr"). If not explicitly stated but employeeCount is known, estimate: 1-10 employees → "Below 1 Cr (est.)", 10-50 → "1-10 Cr (est.)", 50-200 → "10-50 Cr (est.)". Null only if both source data AND employee count are completely unavailable.
+7. painPoints — ALWAYS return 2-4 specific pain points INFERRED from industry, company size, and business type. E.g. printing company: "Managing ink and paper cost volatility", "Meeting tight delivery deadlines during peak season". Do NOT leave empty.
+8. expansionSignals — List any evidence of growth from sources: job listings, new branches, recent awards, new products. Return [] if none found.
+9. currentSoftware — Any ERP, accounting, or business software mentioned. Return [] if none.
+10. Do NOT invent contact data (email, phone, names). But DO infer painPoints from industry knowledge.
 
 ${context}
 
@@ -69,6 +75,9 @@ Return ONLY valid JSON (no markdown, no explanation):
   "teamMembers": [
     {"name": "Full Name from IndiaMART CEO / website team / LinkedIn people", "role": "their exact title"}
   ],
+  "painPoints": ["2-4 specific pain points INFERRED from industry/size/type — ALWAYS populate with at least 2 items"],
+  "expansionSignals": ["Evidence of growth from sources: job listings, new branches, awards, new products. Return [] if none."],
+  "currentSoftware": ["Any ERP, accounting, CRM or business software mentioned. Return [] if none."],
   "confidence": 0.85
 }
 
@@ -156,6 +165,9 @@ export function buildResearchResult(
     certifications: data.certifications?.filter((c) => c && c !== 'null') ?? undefined,
     majorClients:   data.majorClients?.filter((c) => c && c !== 'null') ?? undefined,
     teamMembers:    data.teamMembers?.filter((m) => m.name && m.name !== 'null') ?? undefined,
+    painPoints:     data.painPoints?.filter((p) => p && p !== 'null') ?? undefined,
+    expansionSignals: data.expansionSignals?.filter((s) => s && s !== 'null') ?? undefined,
+    currentSoftware: data.currentSoftware?.filter((s) => s && s !== 'null') ?? undefined,
     confidence:     data.confidence ?? 0.5,
     sourceUrl,
   }

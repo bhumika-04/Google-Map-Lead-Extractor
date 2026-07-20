@@ -18,8 +18,10 @@ import {
   scrapeLinkedInPerson,
   scrapeTwitterProfile,
   scrapeInstagramProfile,
-  resolveTeamLinkedInFromCompany,
+  scrapeFacebookProfile,
+  resolveCompanyPeopleDetailed,
   findPersonLinkedIn,
+  pickDecisionMaker,
   type ScrapeProgress,
 } from './socialScraper'
 
@@ -166,8 +168,10 @@ function buildPersonQuery(
   return `"${personName}" ${companyClause} "${city}" ${roleKeyword} ${suffix}`.trim()
 }
 
-// Scrapes a person's LinkedIn activity using a hidden tab (content script approach).
-// Falls back to Google Search if scraping finds nothing (e.g. user not logged in).
+// Explores ALL channels for one person at once — LinkedIn, web/news, Instagram,
+// Facebook — before the caller moves on to the next person. Runs in parallel
+// (Promise.all) rather than sequentially so a single person's full footprint
+// is gathered in one pass.
 async function fetchPersonActivity(
   name: string,
   role: string,
@@ -177,12 +181,22 @@ async function fetchPersonActivity(
   personLinkedIn?: string,
   onProgress?: (p: ScrapeProgress) => void,
 ): Promise<{ rawText: string; resolvedLinkedInUrl?: string }> {
-  const parts: string[] = []
+  const dateFilter = sixMonthsAgoFilter()
+  const baseQuery  = buildPersonQuery(name, brandVariants, city, role, industry)
 
-  // PRIMARY: Content script — opens LinkedIn tab, scrapes real posts
-  const liResult = await scrapeLinkedInPerson(
-    name, brandVariants, city, personLinkedIn, onProgress
-  )
+  const [liResult, webNews, instagramHits, facebookHits] = await Promise.all([
+    // PRIMARY: Content script — opens LinkedIn tab, scrapes real posts
+    scrapeLinkedInPerson(name, brandVariants, city, personLinkedIn, onProgress),
+    // Web & news mentions (supplements even when LinkedIn worked)
+    googleSearch(`${baseQuery} ${dateFilter}`),
+    // Personal Instagram presence — we don't have a known profile URL for
+    // individuals, so this is a targeted Google site-search
+    googleSearch(`${baseQuery} site:instagram.com`),
+    // Personal Facebook presence — same approach
+    googleSearch(`${baseQuery} site:facebook.com`),
+  ])
+
+  const parts: string[] = []
 
   if (liResult.posts.length > 0) {
     const postLines = liResult.posts.map((p, i) =>
@@ -191,12 +205,16 @@ async function fetchPersonActivity(
     parts.push(`=== LinkedIn posts for ${name} (live scrape) ===\n${postLines}`)
   }
 
-  // FALLBACK: Google Search for web/news mentions (supplements even when LinkedIn worked)
-  const dateFilter = sixMonthsAgoFilter()
-  const q = buildPersonQuery(name, brandVariants, city, role, industry, `${dateFilter}`)
-  const googleText = await googleSearch(q)
-  if (googleText) {
-    parts.push(`=== Web & news mentions (Google) ===\nQuery: ${q}\n${googleText}`)
+  if (webNews) {
+    parts.push(`=== Web & news mentions (Google) ===\nQuery: ${baseQuery} ${dateFilter}\n${webNews}`)
+  }
+
+  if (instagramHits) {
+    parts.push(`=== Instagram mentions (Google site-search) ===\n${instagramHits}`)
+  }
+
+  if (facebookHits) {
+    parts.push(`=== Facebook mentions (Google site-search) ===\n${facebookHits}`)
   }
 
   return {
@@ -249,6 +267,18 @@ async function fetchCompanyActivity(
         `Post ${i + 1}: ${p.text}${p.url ? `\nURL: ${p.url}` : ''}`
       ).join('\n\n')
       parts.push(`=== Company Instagram posts (live) ===\n${lines}`)
+    }
+  }
+
+  // PRIMARY: Content script — scrape Facebook company page if URL known
+  if (socialUrls.facebook) {
+    const fbResult = await scrapeFacebookProfile(socialUrls.facebook, primaryBrand, onProgress)
+    if (fbResult.bio) parts.push(`=== Facebook bio ===\n${fbResult.bio}`)
+    if (fbResult.posts.length > 0) {
+      const lines = fbResult.posts.map((p, i) =>
+        `Post ${i + 1}: ${p.text}${p.url ? `\nURL: ${p.url}` : ''}`
+      ).join('\n\n')
+      parts.push(`=== Company Facebook posts (live) ===\n${lines}`)
     }
   }
 
@@ -396,12 +426,28 @@ export async function runDeepResearch(
   // STEP 1: Scrape the company LinkedIn /people/ page to get individual profile URLs.
   // This is the most reliable way to resolve team member LinkedIn profiles —
   // avoids ambiguity entirely because everyone on that page works at this company.
-  let companyPeopleMap = new Map<string, string>()
+  let companyPeopleDetailed: Array<{ name: string; title: string; profileUrl: string }> = []
+  const companyPeopleMap = new Map<string, string>()
   if (socialUrls.linkedIn) {
     onProgress?.(`Loading ${brandVariants[0]} LinkedIn employee list…`)
-    companyPeopleMap = await resolveTeamLinkedInFromCompany(socialUrls.linkedIn)
+    companyPeopleDetailed = await resolveCompanyPeopleDetailed(socialUrls.linkedIn)
+    for (const p of companyPeopleDetailed) {
+      if (p.profileUrl) companyPeopleMap.set(p.name, p.profileUrl)
+    }
     if (companyPeopleMap.size > 0) {
       onProgress?.(`Found ${companyPeopleMap.size} employees on LinkedIn company page`)
+    }
+  }
+
+  // FALLBACK: No decision maker / team members surfaced during initial research —
+  // pick the most senior person straight off the company's LinkedIn employee list
+  // (founder/CEO/MD/owner/director, in that priority order) so research still
+  // has someone to investigate.
+  if (people.length === 0 && companyPeopleDetailed.length > 0) {
+    const picked = pickDecisionMaker(companyPeopleDetailed)
+    if (picked) {
+      onProgress?.(`No decision maker from research — using ${picked.name} (${picked.title || 'employee'}) from LinkedIn company page`)
+      people.push({ name: picked.name, role: picked.title || 'Decision Maker', linkedInUrl: picked.profileUrl })
     }
   }
 

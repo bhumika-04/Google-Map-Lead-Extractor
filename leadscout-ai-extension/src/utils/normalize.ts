@@ -1,7 +1,9 @@
 export function normalizeName(name: string): string {
+  // Use Unicode property escapes so non-Latin scripts (Arabic, Urdu, Devanagari, CJK, etc.)
+  // are kept instead of being stripped to an empty string.
   return name
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
     .replace(/\s+/g, ' ')
     .trim()
 }

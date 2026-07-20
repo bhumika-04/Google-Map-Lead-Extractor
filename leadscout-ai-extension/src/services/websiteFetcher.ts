@@ -1,5 +1,14 @@
 // Multi-source web fetcher for Indian SMB lead enrichment.
-// Runs in the service worker context (no CORS restrictions for extensions).
+//
+// Every source below is visited one-by-one in a real (background) browser tab
+// — not a raw fetch() — via fetchRenderedHtml(). This avoids bot/CAPTCHA
+// detection on Google/IndiaMART/JustDial (which a plain fetch() from the
+// service worker context is much more likely to trigger at scale) and
+// captures JS-rendered content. The HTML returned is the same shape a raw
+// fetch() would have produced, so all the existing regex-based parsers below
+// are reused unchanged.
+
+import { fetchRenderedHtml } from './socialScraper'
 
 const MAX_TEXT_LENGTH = 6000
 const FETCH_TIMEOUT_MS = 10000
@@ -46,7 +55,7 @@ export function extractEmails(text: string, allowWebmail = false): string[] {
 
 // ─── HTML stripping ────────────────────────────────────────────────────────────
 
-function stripHtml(html: string, maxLen = MAX_TEXT_LENGTH): string {
+export function stripHtml(html: string, maxLen = MAX_TEXT_LENGTH): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -61,27 +70,10 @@ function stripHtml(html: string, maxLen = MAX_TEXT_LENGTH): string {
     .slice(0, maxLen)
 }
 
+// Visits the URL in a real background tab and returns the rendered HTML.
+// Single choke point so every call site below stays unchanged.
 async function safeFetch(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<string | null> {
-  try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), timeoutMs)
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'en-IN,en;q=0.9,hi;q=0.8',
-        'Cache-Control': 'no-cache',
-      },
-    })
-    clearTimeout(t)
-    if (!res.ok) return null
-    const ct = res.headers.get('content-type') ?? ''
-    if (!ct.includes('text/html') && !ct.includes('text/plain')) return null
-    return await res.text()
-  } catch {
-    return null
-  }
+  return fetchRenderedHtml(url, timeoutMs)
 }
 
 // ─── Source: Company website (multi-page crawl) ───────────────────────────────
@@ -152,23 +144,15 @@ export async function fetchWebsiteText(
     usedLabels.add(label)
   }
 
-  // Fetch all sub-pages in parallel (max 5, non-blocking)
-  const subPageResults = await Promise.allSettled(
-    pagesToFetch.slice(0, 8).map(async ({ label, url: pageUrl }) => {
-      const html = await safeFetch(pageUrl, 6000)
-      if (!html) return null
-      extractEmails(html, true).forEach((e) => emails.add(e))
-      Object.assign(socialUrls, extractSocialUrls(html))
-      return { label, text: stripHtml(html, PAGE_TEXT_LENGTH) }
-    })
-  )
-
-  // Build combined text: homepage first, then labeled sub-pages
+  // Visit sub-pages one by one (real tab per page, not parallel)
   const sections: string[] = [`=== Homepage ===\n${homeText}`]
-  for (const result of subPageResults) {
-    if (result.status === 'fulfilled' && result.value?.text && result.value.text.length > 50) {
-      sections.push(`=== ${result.value.label} Page ===\n${result.value.text}`)
-    }
+  for (const { label, url: pageUrl } of pagesToFetch.slice(0, 8)) {
+    const html = await safeFetch(pageUrl, 8000)
+    if (!html) continue
+    extractEmails(html, true).forEach((e) => emails.add(e))
+    Object.assign(socialUrls, extractSocialUrls(html))
+    const text = stripHtml(html, PAGE_TEXT_LENGTH)
+    if (text.length > 50) sections.push(`=== ${label} Page ===\n${text}`)
   }
 
   return {
@@ -347,47 +331,58 @@ async function fetchDirectoryPages(directoryUrls: string[]): Promise<string> {
   })
 
   const toFetch = sorted.slice(0, 3)
-  const results = await Promise.allSettled(
-    toFetch.map((url) => safeFetch(url, 9000))
-  )
-
   const sections: string[] = []
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i]
-    if (r.status !== 'fulfilled' || !r.value) continue
-    const html = r.value
+  for (const url of toFetch) {
+    const html = await safeFetch(url, 12000)
+    if (!html) continue
     const text = stripHtml(html, DIR_PAGE_TEXT_LENGTH)
     if (text.length < 80) continue
-    const domain = new URL(toFetch[i]).hostname.replace('www.', '')
-    sections.push(`=== ${domain} (${toFetch[i]}) ===\n${text}`)
-    // Also harvest emails from these pages
-    extractEmails(html).forEach(() => {})  // side-effect skipped — caller handles emails
+    const domain = new URL(url).hostname.replace('www.', '')
+    sections.push(`=== ${domain} (${url}) ===\n${text}`)
   }
 
   return sections.join('\n\n')
 }
 
-export async function fetchGoogleSearchData(companyName: string, city: string): Promise<{ text: string; discoveredWebsite: string | null } | null> {
+// Google's bot-detection interstitial ("Our systems have detected unusual
+// traffic...") — must be checked before treating a fetch as a real result,
+// otherwise the block page gets silently parsed as empty search results.
+function isGoogleBlocked(html: string | null): boolean {
+  if (!html) return false
+  return /unusual traffic|detected unusual traffic|systems have detected|recaptcha/i.test(html) && html.length < 20000
+}
+
+// Once Google blocks us, hitting it again immediately only extends the
+// block. Back off for the rest of this extension session.
+let googleBlockedUntil = 0
+const GOOGLE_BLOCK_COOLDOWN_MS = 5 * 60 * 1000 // 5 minutes
+
+export async function fetchGoogleSearchData(companyName: string, city: string): Promise<{ text: string; discoveredWebsite: string | null; searchUrl: string } | null> {
+  if (Date.now() < googleBlockedUntil) return null
+
   const base = `https://www.google.com/search?num=10&hl=en&gl=in&q=`
 
-  // Query 1: general — finds website, social, directories
-  const q1 = encodeURIComponent(`"${companyName}" ${city}`)
-  // Query 2: people/leadership — finds CEO, directors, emails, phone
-  const q2 = encodeURIComponent(`"${companyName}" ${city} CEO OR director OR founder OR owner OR contact email`)
-  // Query 3: financials/registry — finds Zaubacorp, revenue, employee count, CIN
-  const q3 = encodeURIComponent(`"${companyName}" ${city} annual turnover OR employees OR revenue OR CIN site:zaubacorp.com OR site:ambitionbox.com OR site:tracxn.com`)
+  // A single combined query covering website/social, leadership, and
+  // financial/registry signals. Firing 3 separate google.com/search hits per
+  // lead (one per topic) tripled request volume from the same browser/IP for
+  // every lead — that was the main driver of Google's bot detection, not pacing.
+  const q1 = encodeURIComponent(
+    `"${companyName}" ${city} CEO OR director OR founder OR owner contact email annual turnover OR employees OR CIN`
+  )
 
-  const [html1, html2, html3] = await Promise.all([
-    safeFetch(`${base}${q1}`, 12000),
-    safeFetch(`${base}${q2}`, 12000),
-    safeFetch(`${base}${q3}`, 12000),
-  ])
+  const searchUrl = `${base}${q1}`
+  const html1 = await safeFetch(searchUrl, 15000)
 
-  if (!html1 && !html2 && !html3) return null
+  if (isGoogleBlocked(html1)) {
+    googleBlockedUntil = Date.now() + GOOGLE_BLOCK_COOLDOWN_MS
+    return null
+  }
 
-  const p1 = html1 ? parseGoogleHtml(html1, companyName) : null
-  const p2 = html2 ? parseGoogleHtml(html2, companyName) : null
-  const p3 = html3 ? parseGoogleHtml(html3, companyName) : null
+  if (!html1) return null
+
+  const p1 = parseGoogleHtml(html1, companyName)
+  const p2 = null
+  const p3 = null
 
   // Merge results — p1 takes priority for URLs
   const socialUrls = { ...(p2?.socialUrls ?? {}), ...(p1?.socialUrls ?? {}) }
@@ -458,12 +453,12 @@ export async function fetchGoogleSearchData(companyName: string, city: string): 
   }
 
   if (!result.length) return null
-  return { text: result.join('\n\n'), discoveredWebsite: websiteUrl ?? null }
+  return { text: result.join('\n\n'), discoveredWebsite: websiteUrl ?? null, searchUrl }
 }
 
 // ─── Source: JustDial ─────────────────────────────────────────────────────────
 
-export async function fetchJustDialData(companyName: string, city: string): Promise<string | null> {
+export async function fetchJustDialData(companyName: string, city: string): Promise<{ text: string; url: string } | null> {
   const q = encodeURIComponent(companyName)
   const url = `https://www.justdial.com/${city}/${q}/ct-${city.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
   const html = await safeFetch(url, 8000)
@@ -477,23 +472,21 @@ export async function fetchJustDialData(companyName: string, city: string): Prom
   const parts: string[] = []
   if (text.length > 50) parts.push(`JustDial listing:\n${text}`)
   if (emails.length) parts.push(`Emails (JustDial): ${emails.join(', ')}`)
-  return parts.length ? parts.join('\n') : null
+  return parts.length ? { text: parts.join('\n'), url } : null
 }
 
 // ─── Source: IndiaMART ────────────────────────────────────────────────────────
 // Strategy: search for the company → extract profile URL → fetch profile page
 // The profile page has CEO, employee count, turnover, GST, legal status, etc.
 
-export async function fetchIndiaMartData(companyName: string, city: string): Promise<string | null> {
+export async function fetchIndiaMartData(companyName: string, city: string): Promise<{ text: string; url: string } | null> {
   // IndiaMART company profiles live at indiamart.com/{slug}/ where slug = lowercased name without spaces/punctuation.
   // Try the constructed URL first (most reliable), then fall back to search.
   const slug = companyName.toLowerCase().replace(/[^a-z0-9]/g, '')
   const directUrl = `https://www.indiamart.com/${slug}/`
 
-  const [directHtml, searchHtml] = await Promise.all([
-    safeFetch(directUrl, 10000),
-    safeFetch(`https://dir.indiamart.com/search.mp?ss=${encodeURIComponent(`${companyName} ${city}`)}`, 8000),
-  ])
+  // Try the direct URL first; only fall back to a search visit if that fails
+  const directHtml = await safeFetch(directUrl, 10000)
 
   let profileUrl: string | null = null
   let profileHtml: string | null = null
@@ -503,6 +496,10 @@ export async function fetchIndiaMartData(companyName: string, city: string): Pro
     profileUrl = directUrl
     profileHtml = directHtml
   }
+
+  const searchHtml = profileHtml
+    ? null
+    : await safeFetch(`https://dir.indiamart.com/search.mp?ss=${encodeURIComponent(`${companyName} ${city}`)}`, 10000)
 
   // Fallback: parse search results for a company profile link
   if (!profileHtml && searchHtml) {
@@ -530,7 +527,9 @@ export async function fetchIndiaMartData(companyName: string, city: string): Pro
   if (profileUrl) parts.push(`IndiaMART company profile: ${profileUrl}`)
   if (text.length > 50) parts.push(`IndiaMART data (key fields: Company CEO, Total Number of Employees, Annual Turnover, Legal Status of Firm, Nature of Business, GST Number, established year, products):\n${text}`)
   if (emails.length) parts.push(`Emails (IndiaMART): ${emails.join(', ')}`)
-  return parts.length ? parts.join('\n') : null
+  return parts.length
+    ? { text: parts.join('\n'), url: profileUrl ?? `https://dir.indiamart.com/search.mp?ss=${encodeURIComponent(`${companyName} ${city}`)}` }
+    : null
 }
 
 // ─── Build AI context from all sources ────────────────────────────────────────

@@ -5,10 +5,11 @@ import type { AppSettings } from './settings'
 
 export const MSG = {
   // Dashboard → Background
-  SEARCH_START:     'SEARCH_START',
-  CAPTURE_STOP:     'CAPTURE_STOP',
-  GET_STATUS:       'GET_STATUS',
-  OPEN_DASHBOARD:   'OPEN_DASHBOARD',
+  SEARCH_START:       'SEARCH_START',
+  SEARCH_QUEUE_START: 'SEARCH_QUEUE_START',   // multi-term run — queue owned by the service worker
+  CAPTURE_STOP:       'CAPTURE_STOP',
+  GET_STATUS:         'GET_STATUS',
+  OPEN_DASHBOARD:     'OPEN_DASHBOARD',
 
   // Background → Content
   MAPS_START_CAPTURE: 'MAPS_START_CAPTURE',
@@ -32,6 +33,21 @@ export const MSG = {
 
   // Dashboard → Background (DB sync)
   SYNC_FROM_DB:      'SYNC_FROM_DB',
+
+  // Batch campaigns
+  BATCH_CAMPAIGN_START:  'BATCH_CAMPAIGN_START',
+  BATCH_CAMPAIGN_STOP:   'BATCH_CAMPAIGN_STOP',
+  BATCH_CAMPAIGN_STATUS: 'BATCH_CAMPAIGN_STATUS',
+
+  // Follow-up scheduler
+  CHECK_FOLLOWUPS: 'CHECK_FOLLOWUPS',
+
+  // LinkedIn automated scraper
+  LI_SCRAPER_START:  'LI_SCRAPER_START',   // dashboard → SW: start job for a lead
+  LI_SCRAPER_READY:  'LI_SCRAPER_READY',   // content   → SW: page loaded, awaiting instructions
+  LI_SCRAPER_DATA:   'LI_SCRAPER_DATA',    // content   → SW: scraped data for one step
+  LI_SCRAPER_CANCEL: 'LI_SCRAPER_CANCEL',  // dashboard → SW: abort job
+  LI_SCRAPER_STATUS: 'LI_SCRAPER_STATUS',  // dashboard → SW: poll current job state
 } as const
 
 export type MessageType = typeof MSG[keyof typeof MSG]
@@ -42,9 +58,33 @@ export interface SearchStartPayload {
   sessionId: number
   city: string
   keyword: string
+  country: string              // ISO code e.g. 'IN', 'AE', 'SA'
   maxResults: number
   mapsUrl: string
   settings: Pick<AppSettings, 'autoScrollDelay' | 'maxScrollAttempts' | 'noNewLeadStopThreshold'>
+  projectId?: number           // Search Session — stamped on every captured lead
+}
+
+// Multi-term Search Console run. The full keyword×city list is handed to the
+// service worker in one message — the SW persists it (chrome.storage.local) and
+// drives the whole run itself, so closing/refreshing the dashboard tab can no
+// longer kill a long sequential run partway through.
+export interface SearchQueueStartPayload {
+  terms: Array<{ keyword: string; city: string }>
+  country: string
+  settings: Pick<AppSettings, 'autoScrollDelay' | 'maxScrollAttempts' | 'noNewLeadStopThreshold'>
+  projectId?: number   // Search Session created by the dashboard before submitting the run
+}
+
+// Queue progress attached to PROGRESS_UPDATE broadcasts (and GET_STATUS
+// responses) so the dashboard can display "Term 26 of 490" after a reload.
+export interface SearchQueueProgress {
+  current: number      // 1-based index of the term now running
+  total: number
+  keyword: string
+  city: string
+  totalLeads: number   // cumulative across finished terms
+  done?: boolean       // set on the final broadcast when the whole run completes
 }
 
 export interface MapsStartCapturePayload {
@@ -78,6 +118,11 @@ export interface ProgressUpdatePayload {
   duplicatesSkipped: number
   status: string
   message?: string
+  // Optional pipeline phase — set during the post-capture enrichment/validation steps.
+  // Separate from capture `status` so badge logic and completed-toast logic are not affected.
+  pipelinePhase?: string
+  // Present when this progress belongs to a service-worker-driven multi-term run.
+  queue?: SearchQueueProgress
 }
 
 // ─── Generic message envelope ─────────────────────────────────────────────────

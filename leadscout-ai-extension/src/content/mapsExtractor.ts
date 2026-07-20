@@ -1,8 +1,10 @@
 import type { Lead } from '@/types/lead'
 
-// Inlined to keep content script self-contained (no shared Rollup chunks)
+// Inlined to keep content script self-contained (no shared Rollup chunks).
+// Unicode property escapes preserve non-Latin scripts (Arabic, Urdu, CJK, etc.)
+// so Urdu company names don't collapse to an empty dedup key.
 function normalizeName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 80)
+  return name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').slice(0, 80)
 }
 function nowISO(): string {
   return new Date().toISOString()
@@ -122,6 +124,43 @@ function parsePhoneFromText(text: string): string | undefined {
   return best ?? (clean[0]?.replace(/\D/g, '').length >= 7 ? clean[0] : undefined)
 }
 
+/**
+ * Strip opening-hours status and phone numbers from a raw Google Maps card
+ * address row.  The Maps DOM emits text like:
+ *   "Print shop · 52, Shani Mandir RdOpen · Closes 9:30 pm · 098933 68152"
+ * After cleaning we get: "52, Shani Mandir Rd"
+ */
+function cleanAddressText(raw: string): string {
+  let s = raw
+    // Hours/status strings (may be preceded by ·)
+    .replace(/\s*·?\s*Open\s+now\s*/gi, ' ')
+    .replace(/\s*·?\s*Closes?\s+\d[\d:]*\s*(?:am|pm)\s*/gi, ' ')
+    .replace(/\s*·?\s*Opens?(?:\s+at)?\s+\d[\d:]*\s*(?:am|pm)\s*/gi, ' ')
+    .replace(/\s*·?\s*Temporarily\s+closed\s*/gi, ' ')
+    .replace(/\s*·?\s*Permanently\s+closed\s*/gi, ' ')
+    // Bare "Open" / "Closed" status words appended inline (e.g. "RdOpen")
+    .replace(/\bOpen\b/gi, '')
+    .replace(/\bClosed\b/gi, '')
+    // Phone-like digit sequences after a · separator, or trailing
+    .replace(/\s*·\s*[\d\s()+\-]{7,}/g, '')
+    .replace(/\s+[\d\s()+\-]{9,}$/g, '')
+    // Clean up leftover separators and whitespace
+    .replace(/^[\s·,]+|[\s·,]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  // If multiple ·-separated segments remain, drop a leading category-only segment
+  // (no digits, no common road/location keywords — it's just a business type label).
+  const parts = s.split('·').map(p => p.trim()).filter(Boolean)
+  if (parts.length > 1) {
+    const looksLikeCategory = (p: string) =>
+      !/\d/.test(p) &&
+      !/(?:rd\b|road|nagar|colony|chowk|market|marg|sector|lane|street|area|estate|block|phase|plot|near|opp|behind)/i.test(p)
+    if (looksLikeCategory(parts[0])) parts.shift()
+  }
+  return parts.join(', ').replace(/\s+/g, ' ').trim()
+}
+
 function extractCardData(card: Element): RawBusinessCard | null {
   const rawText = (card as HTMLElement).innerText || card.textContent || ''
 
@@ -176,7 +215,7 @@ function extractCardData(card: Element): RawBusinessCard | null {
   for (const row of Array.from(infoRows)) {
     const text = row.textContent?.trim() ?? ''
     if (text.match(/\d/) && text.length > 10 && text.length < 200) {
-      address = text.replace(/\s+/g, ' ')
+      address = cleanAddressText(text)
       break
     }
   }
@@ -267,6 +306,44 @@ export function extractDetailPanelData(): Partial<RawBusinessCard> {
   }
 
   return result
+}
+
+// Extracts the single business shown when Google Maps redirects a search
+// straight to a /maps/place/... page instead of a results list — common when
+// the search text closely matches one business's exact listed name (e.g. a
+// business that stuffs multiple category keywords into its display name).
+// Without this fallback, capture would find zero result cards on this page
+// shape and silently end the session with nothing, wasting the whole attempt
+// even though the one exact match is sitting right there on screen.
+export function extractSingleBusinessFromPlacePage(): RawBusinessCard | null {
+  const heading =
+    document.querySelector('h1.DUwDvf')?.textContent?.trim() ??
+    document.querySelector('[role="main"] h1')?.textContent?.trim() ??
+    document.querySelector('div[aria-label][role="main"]')?.getAttribute('aria-label')?.trim()
+  if (!heading) return null
+
+  const detail = extractDetailPanelData()
+  const category = document.querySelector('button[jsaction*="category"]')?.textContent?.trim()
+    ?? document.querySelector('.DkEaL')?.textContent?.trim()
+
+  const ratingEl = document.querySelector('span.ceNzKf, div.F7nice span[aria-hidden="true"]')
+  const rating = ratingEl ? parseRating(ratingEl) : undefined
+  const reviewCountEl = document.querySelector('span[aria-label*="review"]')
+  const reviewCount = reviewCountEl ? parseReviewCount(reviewCountEl) : undefined
+
+  const rawText = (document.querySelector('[role="main"]') as HTMLElement)?.innerText?.slice(0, 500) ?? heading
+
+  return {
+    companyName: heading,
+    category,
+    rating,
+    reviewCount,
+    address: detail.address,
+    phone: detail.phone,
+    website: detail.website,
+    googleMapsUrl: location.href.split('?')[0],
+    rawText,
+  }
 }
 
 export function extractVisibleCards(): RawBusinessCard[] {

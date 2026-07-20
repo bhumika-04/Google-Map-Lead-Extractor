@@ -1,8 +1,9 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useSettingsStore } from '@/state/useSettingsStore'
 import { useLeadStore } from '@/state/useLeadStore'
 import { leadRepository } from '@/db/leadRepository'
 import { validateLeads, DailyQuotaExhaustedError, type ValidationResult, type ValidationProvider } from '@/services/leadValidationService'
+import { saveValidationBulkToSql, resolveAiCredentials, saveBusinessProfile } from '@/services/sqlSyncService'
 import { toast } from '@/state/useToastStore'
 
 type State = 'idle' | 'running' | 'done' | 'quota_exhausted'
@@ -32,8 +33,31 @@ const SETTINGS_PATH: Record<ValidationProvider, string> = {
 }
 
 export default function ValidationPanel() {
-  const { settings } = useSettingsStore()
+  const { settings, load: reloadSettings } = useSettingsStore()
   const { loadLeads } = useLeadStore()
+
+  // Business Profile editing — persists to appsettings.json's App:BusinessProfile
+  // via the DeepLead API (the extension has no local storage for this field).
+  const [editingProfile, setEditingProfile] = useState(false)
+  const [profileDraft, setProfileDraft]     = useState(settings.businessProfile)
+  const [savingProfile, setSavingProfile]   = useState(false)
+
+  useEffect(() => {
+    if (!editingProfile) setProfileDraft(settings.businessProfile)
+  }, [settings.businessProfile, editingProfile])
+
+  async function handleSaveProfile() {
+    setSavingProfile(true)
+    const ok = await saveBusinessProfile(profileDraft.trim())
+    setSavingProfile(false)
+    if (ok) {
+      toast.success('Business profile saved')
+      setEditingProfile(false)
+      await reloadSettings()
+    } else {
+      toast.error('Failed to save — is the DeepLead API running?')
+    }
+  }
 
   const [state, setState]         = useState<State>('idle')
   const [progress, setProgress]   = useState({ done: 0, total: 0 })
@@ -41,11 +65,41 @@ export default function ValidationPanel() {
   const [activeTab, setActiveTab] = useState<'relevant' | 'not_relevant'>('relevant')
   const [confirmed, setConfirmed] = useState(false)
 
-  const provider = settings.researchProvider as ValidationProvider
-  const apiKey =
-    provider === 'openai'    ? settings.openAiApiKey :
-    provider === 'anthropic' ? settings.anthropicApiKey :
-    settings.geminiApiKey
+  // Resolved from backend appsettings.json
+  const [creds, setCreds] = useState<{ provider: ValidationProvider; apiKey: string }>({
+    provider: settings.researchProvider as ValidationProvider,
+    apiKey:
+      settings.researchProvider === 'openai'    ? settings.openAiApiKey :
+      settings.researchProvider === 'anthropic' ? settings.anthropicApiKey :
+      settings.geminiApiKey,
+  })
+
+  useEffect(() => {
+    let cancelled = false
+    resolveAiCredentials(settings).then((resolved) => {
+      if (!cancelled) setCreds(resolved)
+    })
+    return () => { cancelled = true }
+  }, [settings.researchProvider, settings.geminiApiKey, settings.openAiApiKey, settings.anthropicApiKey])
+
+  // Local overrides — let user switch provider/key without touching appsettings.json
+  const [providerOverride, setProviderOverride] = useState<ValidationProvider | null>(null)
+  const [keyOverride, setKeyOverride]           = useState('')
+
+  const provider = providerOverride ?? creds.provider
+  const apiKey   = providerOverride
+    ? (keyOverride.trim() || (
+        providerOverride === 'openai'    ? settings.openAiApiKey :
+        providerOverride === 'anthropic' ? settings.anthropicApiKey :
+        settings.geminiApiKey
+      ))
+    : creds.apiKey
+
+  function handleSwitchProvider(p: ValidationProvider) {
+    setProviderOverride(p)
+    setKeyOverride('')
+    setState('idle')
+  }
 
   const hasProfile = !!settings.businessProfile.trim()
   const hasKey     = !!apiKey.trim()
@@ -111,12 +165,29 @@ export default function ValidationPanel() {
 
   async function handleConfirm() {
     if (relevant.length === 0) return
+
+    // 1. Update IndexedDB (source of truth for UI state)
     await leadRepository.bulkUpdateValidation([
       ...relevant.map((r)    => ({ id: r.leadId, status: 'relevant'     as const, reason: r.reason })),
       ...notRelevant.map((r) => ({ id: r.leadId, status: 'not_relevant' as const, reason: r.reason })),
     ])
     const relevantIds = relevant.map((r) => r.leadId)
     await leadRepository.updateMany(relevantIds, { status: 'selected' })
+
+    // 2. Persist to MSSQL so Selected Leads survive extension reinstall
+    const allLeads = await Promise.all(
+      [...relevant.map(r => r.leadId), ...notRelevant.map(r => r.leadId)]
+        .map(id => leadRepository.getById(id))
+    )
+    const relevantIdSet = new Set(relevantIds)
+    const mssqlUpdates = allLeads
+      .filter((l): l is NonNullable<typeof l> => !!l?.mssqlId)
+      .map(l => ({
+        mssqlId: l.mssqlId!,
+        status:  relevantIdSet.has(l.id!) ? 'selected' as const : 'not_relevant' as const,
+      }))
+    saveValidationBulkToSql(mssqlUpdates).catch(() => {})   // fire-and-forget
+
     await loadLeads({ status: 'selected' })
     setConfirmed(true)
     toast.success(`${relevant.length} leads added to Selected Leads`)
@@ -141,17 +212,39 @@ export default function ValidationPanel() {
           <span className={`text-xs px-2 py-0.5 rounded-full border ${badgeStyle}`}>{providerLabel}</span>
         </div>
         <div className="bg-red-950/50 border border-red-800/50 rounded-lg p-4 space-y-2">
-          <div className="text-red-400 font-semibold text-sm">Daily API Quota Exhausted</div>
-          <p className="text-xs text-red-300/80 leading-relaxed">
-            Your {providerLabel} API free tier daily limit has been reached. Validation will resume after the quota resets.
-          </p>
-          <div className="text-xs text-gray-500 space-y-1 pt-1">
-            <div>Options:</div>
-            <div>• Wait until tomorrow (quota resets daily)</div>
-            <div>• Upgrade to a paid API plan</div>
-            <div>• Switch to a different AI provider in Settings</div>
+          <div className="text-red-400 font-semibold text-sm">
+            {providerLabel} Credits Exhausted
           </div>
+          <p className="text-xs text-red-300/80 leading-relaxed">
+            Your {providerLabel} quota or prepayment credits are depleted. Switch to another provider to continue.
+          </p>
         </div>
+
+        <div className="space-y-2">
+          <div className="text-xs text-gray-500">Switch provider and retry:</div>
+          <div className="flex gap-2">
+            {(['openai', 'anthropic', 'gemini'] as ValidationProvider[]).filter(p => p !== provider).map((p) => (
+              <button
+                key={p}
+                onClick={() => handleSwitchProvider(p)}
+                className={`flex-1 py-2 text-xs rounded-lg border font-semibold transition-colors ${PROVIDER_BADGE_STYLE[p]}`}
+              >
+                Switch to {PROVIDER_LABELS[p]}
+              </button>
+            ))}
+          </div>
+          {providerOverride && !apiKey.trim() && (
+            <input
+              type="password"
+              placeholder={`${PROVIDER_LABELS[providerOverride]} API key`}
+              value={keyOverride}
+              onChange={(e) => setKeyOverride(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded-lg px-3 py-2
+                placeholder-gray-600 focus:outline-none focus:border-blue-600"
+            />
+          )}
+        </div>
+
         <button
           onClick={handleReset}
           className="w-full py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded-lg transition-colors"
@@ -164,36 +257,103 @@ export default function ValidationPanel() {
 
   // ── Idle state ──────────────────────────────────────────────────────────────
   if (state === 'idle') {
+    const allProviders: ValidationProvider[] = ['gemini', 'openai', 'anthropic']
+
     return (
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2">
-              <h3 className="font-semibold text-white text-sm">AI Lead Validation</h3>
-              <span className={`text-xs px-2 py-0.5 rounded-full border ${badgeStyle}`}>{providerLabel}</span>
-            </div>
+            <h3 className="font-semibold text-white text-sm">AI Lead Validation</h3>
             <p className="text-xs text-gray-500 mt-1">
-              Automatically validate all leads in your database against your business profile.
-              Relevant leads are added here; irrelevant ones are tagged "Not Relevant" in Lead Database.
+              Automatically validate all leads against your business profile.
+              Relevant leads are added here; irrelevant ones are tagged "Not Relevant".
             </p>
           </div>
         </div>
 
-        {hasProfile ? (
-          <div className="bg-gray-800 rounded-lg px-3 py-2.5 space-y-1">
+        {/* Provider selector */}
+        <div className="space-y-2">
+          <div className="text-xs text-gray-500 font-medium">AI Provider</div>
+          <div className="flex gap-2">
+            {allProviders.map((p) => (
+              <button
+                key={p}
+                onClick={() => handleSwitchProvider(p)}
+                className={`flex-1 py-1.5 text-xs rounded-lg border transition-colors ${
+                  provider === p
+                    ? PROVIDER_BADGE_STYLE[p] + ' font-semibold'
+                    : 'border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-600'
+                }`}
+              >
+                {PROVIDER_LABELS[p]}
+              </button>
+            ))}
+          </div>
+          {/* Key input — shown when override active and no key already configured */}
+          {providerOverride && !apiKey.trim() && (
+            <input
+              type="password"
+              placeholder={`${PROVIDER_LABELS[providerOverride]} API key`}
+              value={keyOverride}
+              onChange={(e) => setKeyOverride(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded-lg px-3 py-2
+                placeholder-gray-600 focus:outline-none focus:border-blue-600"
+            />
+          )}
+        </div>
+
+        {/* Business Profile — editable, persists to appsettings.json via the API */}
+        <div className="bg-gray-800 rounded-lg px-3 py-2.5 space-y-2">
+          <div className="flex items-center justify-between">
             <div className="text-xs text-gray-500 font-medium">Your Business Profile</div>
+            {!editingProfile && (
+              <button
+                onClick={() => { setProfileDraft(settings.businessProfile); setEditingProfile(true) }}
+                className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                Edit
+              </button>
+            )}
+          </div>
+
+          {editingProfile ? (
+            <div className="space-y-2">
+              <textarea
+                value={profileDraft}
+                onChange={(e) => setProfileDraft(e.target.value)}
+                rows={8}
+                className="w-full bg-gray-900 border border-gray-700 text-white text-xs rounded-lg px-3 py-2
+                  leading-relaxed focus:outline-none focus:border-blue-600 resize-y font-mono"
+                placeholder="Describe your product/ICP — this becomes the MY BUSINESS section of the validation prompt."
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveProfile}
+                  disabled={savingProfile || !profileDraft.trim()}
+                  className="flex-1 py-1.5 bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+                >
+                  {savingProfile ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  onClick={() => { setEditingProfile(false); setProfileDraft(settings.businessProfile) }}
+                  disabled={savingProfile}
+                  className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+              <div className="text-xs text-gray-600">Saved to appsettings.json — no API restart needed.</div>
+            </div>
+          ) : hasProfile ? (
             <p className="text-xs text-gray-300 leading-relaxed line-clamp-3">{settings.businessProfile}</p>
-            <a href="#settings" className="text-xs text-blue-400 hover:text-blue-300">Edit in Settings →</a>
-          </div>
-        ) : (
-          <div className="bg-yellow-950/40 border border-yellow-800/40 rounded-lg px-3 py-2.5 text-xs text-yellow-300">
-            No business profile set. Go to <strong>Settings → My Business Profile</strong> and describe your business first.
-          </div>
-        )}
+          ) : (
+            <p className="text-xs text-yellow-300">No business profile set — click Edit to add one.</p>
+          )}
+        </div>
 
         {!hasKey && (
           <div className="bg-orange-950/40 border border-orange-800/40 rounded-lg px-3 py-2.5 text-xs text-orange-300">
-            {providerLabel} API key required. Go to <strong>{SETTINGS_PATH[provider]}</strong> and add your key.
+            {providerLabel} API key not configured. Add it to <strong>appsettings.json</strong> or enter it above.
           </div>
         )}
 
@@ -203,7 +363,7 @@ export default function ValidationPanel() {
           className="w-full py-2.5 bg-blue-700 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed
             text-white text-sm font-semibold rounded-lg transition-colors"
         >
-          Validate All Leads from Database
+          Validate All Leads with {providerLabel}
         </button>
       </div>
     )

@@ -28,10 +28,13 @@ export function openDashboard(): void {
   const url = chrome.runtime.getURL('dashboard/dashboard.html')
   chrome.tabs.query({ url }, (tabs) => {
     if (tabs.length > 0 && tabs[0].id) {
-      chrome.tabs.update(tabs[0].id, { active: true })
-      chrome.windows.update(tabs[0].windowId!, { focused: true })
+      // Can reject with "Tabs cannot be edited right now (user may be dragging
+      // a tab)" — transient, not a real failure; swallow rather than leave
+      // an unhandled rejection.
+      chrome.tabs.update(tabs[0].id, { active: true }).catch(() => {})
+      chrome.windows.update(tabs[0].windowId!, { focused: true }).catch(() => {})
     } else {
-      chrome.tabs.create({ url })
+      chrome.tabs.create({ url }).catch(() => {})
     }
   })
 }
