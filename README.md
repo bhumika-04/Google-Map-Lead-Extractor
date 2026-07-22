@@ -2,7 +2,7 @@
 
 A full-stack B2B lead generation system built as a **Chrome Extension (MV3)** with a local **ASP.NET API** and **MSSQL** backend. It automates lead discovery from Google Maps, enriches each lead through multi-source AI research, scrapes 6 months of social activity from LinkedIn/Twitter/Instagram to build intent signals, and tracks the full outreach conversation pipeline — all from a single dashboard.
 
-Built specifically for Indian SMB sales teams. Supports IndiaMART, JustDial, Zaubacorp, and Interakt WhatsApp Business API out of the box.
+Works across markets via a per-country intelligence layer (local Google region, currencies, corporate registries, business directories, and local-language search). Supports IndiaMART, JustDial, Zaubacorp, and Interakt WhatsApp Business API out of the box.
 
 ---
 
@@ -21,8 +21,14 @@ Built specifically for Indian SMB sales teams. Supports IndiaMART, JustDial, Zau
 - Status tracking: New → Selected / Rejected
 - Notes and tags per lead
 - Bulk actions: select all, tag, delete, export
-- Export to **CSV** or **JSON**
-- Filter by city, keyword, rating, phone availability, validation status
+- Export to **CSV**, **JSON**, **Word (.doc)**, or a professional **PDF dossier** (one lead per page)
+- Import leads from **CSV or Excel** (`.csv` / `.xlsx` / `.xls`) into a chosen Session
+- Filter by city, keyword, rating, phone availability, validation status, session, and country
+
+### Search Sessions & Pipeline
+- Name each run in **Search Console** — a Session groups its leads, validation, and research in one workspace, each with its own ICP profile so different domains (schools, pesticides, printing…) never mix
+- A **Session Pipeline** page shows any session's funnel live — Captured → Enriched → Scored → Relevant → Researched — with actions to view leads, queue research, and run it
+- Import an outside list (CSV/Excel) straight into a session from Lead Database, Selected Leads, or Research Queue
 
 ### AI Lead Validation
 - Describe your business once in Settings (e.g. "We sell ERP to packaging manufacturers in India")
@@ -274,10 +280,7 @@ Google-Map-Lead-Extractor/
 │
 └── DeepLeadApi/                       ASP.NET 9 Minimal API
     ├── Program.cs                     All endpoints + DTOs (single file)
-    ├── schema.sql                     MSSQL DDL — safe to re-run (base schema)
-    ├── schema_v2_addons.sql           MSSQL DDL — nurture sequences / follow-ups
-    ├── schema_v3_research_evidence.sql  MSSQL DDL — evidence-based research tables
-    └── appsettings.example.json       Config template (copy → appsettings.json)
+    └── create_database_full.sql       One-file DB bootstrap — all tables, indexes, views, procedures
 ```
 
 ---
@@ -300,14 +303,14 @@ Google-Map-Lead-Extractor/
 
 ### 1. Create the Database
 
-Open SQL Server Management Studio (SSMS), connect to your SQL Server instance, then run:
+Run the single bootstrap script — it creates the database and every table, index, view, and stored procedure in one go:
 
-```sql
-CREATE DATABASE deeplead;
+```bash
+sqlcmd -S YOUR_SERVER -U YOUR_USER -P YOUR_PASSWORD -I -i DeepLeadApi/create_database_full.sql
 ```
 
-Now open `DeepLeadApi/schema.sql` in SSMS and run it against the `deeplead` database, then run `schema_v2_addons.sql` and `schema_v3_research_evidence.sql` in order.
-All three scripts are safe to re-run — every table and column uses `IF NOT EXISTS` guards.
+Or open `DeepLeadApi/create_database_full.sql` in SSMS and click **Execute**.
+It is idempotent — safe to re-run (every object uses `IF NOT EXISTS` guards).
 
 ### 2. Configure and Start the API
 
@@ -374,10 +377,11 @@ Click the extension icon → **Open Dashboard** → **Settings**
 ### Capturing Leads
 
 1. Open the Dashboard → **Search Console**
-2. Enter a city and keyword (e.g. City: `Indore`, Keyword: `Packaging`)
-3. Click **Start Search** — the extension opens Google Maps automatically and starts scrolling
-4. Watch the live progress badge and **Live Capture** panel
-5. When done, go to **Lead Database** to see all captured leads
+2. *(Optional)* Give the run a **Session name** (e.g. "Printing — Gujarat") so its leads, validation, and research stay grouped in one workspace
+3. Pick a market (country), one or more cities, and a keyword
+4. Click **Start Search** — the extension opens Google Maps automatically and starts scrolling
+5. Watch the live progress badge and **Live Capture** panel
+6. When done, open **Lead Database** to see captured leads, or the **Session Pipeline** page to watch the whole run progress
 
 > Use **Search Presets** to save frequently used searches (e.g. "Indore — Packaging", "Pune — Pharma")
 
@@ -427,11 +431,11 @@ The extension will:
 
 Pipeline stages: **Cold → Contacted → Replied → Nurturing → Meeting Scheduled → Won / Lost**
 
-### Export
+### Import & Export
 
-In **Lead Database**:
-- Select leads (or select all)
-- Click **CSV** or **JSON** to export
+**Import** — on **Lead Database**, **Selected Leads**, or **Research Queue**, use the import panel to bring in a `.csv` / `.xlsx` / `.xls` list. Pick or create a Session; imported rows are tagged to it and follow that screen's pipeline (new leads · Selected · Selected + queued for research). Duplicate-safe.
+
+**Export** — in **Lead Database**, select leads (or all) and export to **CSV**, **JSON**, **Word (.doc)**, or **PDF**. The PDF is a professional one-lead-per-page dossier (contact, enrichment, ICP score, key people, sources).
 
 ---
 
@@ -558,8 +562,8 @@ The 6-month scroll loop runs inside the tab context:
 - Verify the phone number has opted in (WhatsApp Business requirement)
 
 **MSSQL schema error**
-- Re-run `schema.sql`, `schema_v2_addons.sql`, and `schema_v3_research_evidence.sql` in order in SSMS — all are safe to run multiple times
-- Make sure you are connected to the `deeplead` database (not master)
+- Re-run `DeepLeadApi/create_database_full.sql` — it is idempotent (safe to run multiple times)
+- Keep `QUOTED_IDENTIFIER ON` so the filtered indexes create — it's the SSMS default; with `sqlcmd` pass the `-I` flag
 
 ---
 

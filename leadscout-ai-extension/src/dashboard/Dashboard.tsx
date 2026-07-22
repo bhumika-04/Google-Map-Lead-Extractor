@@ -8,15 +8,13 @@ import LeadTable from './components/LeadTable'
 import ActivityLogPanel from './components/ActivityLogPanel'
 import ToastContainer from './components/Toast'
 import LeadDetailPanel from './components/LeadDetailPanel'
-import AnalyticsSection from './components/AnalyticsSection'
-import CsvImportSection from './components/CsvImportSection'
-import SelectedCsvImport from './components/SelectedCsvImport'
+import ImportPanel from './components/ImportPanel'
 import ExistingClientsSection from './components/ExistingClientsSection'
 import BackupRestoreSection from './components/BackupRestoreSection'
 import ResearchPage from './components/ResearchPage'
-import CompanyIntelligencePage from './components/CompanyIntelligencePage'
-import LinkedInIntelligencePage from './components/LinkedInIntelligencePage'
 import MarketsPage from './components/MarketsPage'
+import SessionDashboard from './components/SessionDashboard'
+import SessionWorkspace from './components/SessionWorkspace'
 import ValidationPanel from './components/ValidationPanel'
 import BatchCampaignPanel from './components/BatchCampaignPanel'
 import FollowUpPanel from './components/FollowUpPanel'
@@ -30,18 +28,19 @@ import { toast } from '@/state/useToastStore'
 import { MSG } from '@/types/messages'
 import type { ProgressUpdatePayload } from '@/types/messages'
 import { researchJobRepository } from '@/db/researchJobRepository'
-import { searchEvidenceRepository } from '@/db/searchEvidenceRepository'
-import { sourcePageRepository } from '@/db/sourcePageRepository'
 import { searchSessionRepository } from '@/db/searchSessionRepository'
 import { leadRepository } from '@/db/leadRepository'
 import { existingClientRepository } from '@/db/existingClientRepository'
 import { fetchExistingClients } from '@/services/sqlSyncService'
+import { syncDerivedLeads } from '@/services/derivedLeadsService'
 import StatusBadge from './components/StatusBadge'
 import { timeAgo } from '@/utils/date'
 import { activityLogRepository } from '@/db/activityLogRepository'
 
 export default function Dashboard() {
   const [section, setSection] = useState<NavSection>('overview')
+  // When set, a self-contained Session Workspace overlays the normal section content.
+  const [workspaceId, setWorkspaceId] = useState<number | null>(null)
   const [researchCount, setResearchCount] = useState(0)
   // Total leads in IndexedDB — the sidebar badge. Deliberately NOT leads.length
   // from the store: that reflects whatever filter the current page loaded
@@ -104,6 +103,7 @@ export default function Dashboard() {
     chrome.runtime.sendMessage({ type: MSG.SYNC_FROM_DB })
       .then(() => loadLeads())
       .catch(() => loadLeads())  // If backend down, fall back to whatever is local
+      .finally(() => syncDerivedLeads())   // rebuild selected/researched tables from leads
 
     chrome.runtime.sendMessage({ type: MSG.GET_STATUS })
       .then((res: any) => {
@@ -162,7 +162,7 @@ export default function Dashboard() {
     <div className="flex h-screen bg-gray-950 overflow-hidden">
       <Sidebar
         active={section}
-        onChange={setSection}
+        onChange={(s) => { setWorkspaceId(null); setSection(s) }}
         leadCount={totalLeadCount}
         researchCount={researchCount}
       />
@@ -172,35 +172,42 @@ export default function Dashboard() {
 
         <div className="flex-1 flex min-h-0 overflow-hidden">
           <main className="flex-1 overflow-auto p-5 flex flex-col min-h-0">
+            {workspaceId !== null && (
+              <SessionWorkspace projectId={workspaceId} onExit={() => setWorkspaceId(null)} />
+            )}
+            {workspaceId === null && <>
             {section === 'overview'  && <OverviewSection onNavigate={setSection} />}
             {section === 'search'    && (
               <div className="flex flex-col gap-5">
-                <SearchConsole />
                 <ProgressCards />
-                <SearchSessionCards onNavigate={setSection} />
+                <SearchConsole />
+                <SearchSessionCards onNavigate={setSection} onOpenWorkspace={setWorkspaceId} />
               </div>
             )}
-            {section === 'leads'    && <LeadTable title="All Leads" />}
+            {section === 'leads'    && (
+              <div className="flex flex-col flex-1 min-h-0 gap-5">
+                <ImportPanel mode="leads" />
+                <LeadTable title="All Leads" />
+              </div>
+            )}
             {section === 'selected' && (
               <div className="flex flex-col flex-1 min-h-0 gap-5">
                 <ValidationPanel />
-                <SelectedCsvImport />
+                <ImportPanel mode="selected" />
                 <LeadTable title="Selected Leads" filterStatus="selected" />
               </div>
             )}
+            {section === 'session_pipeline'  && <SessionDashboard onNavigate={setSection} onOpenWorkspace={setWorkspaceId} />}
             {section === 'batch_campaigns'   && <BatchCampaignPanel />}
             {section === 'research'         && <ResearchQueueSection />}
             {section === 'research_results' && <ResearchPage />}
-            {section === 'company_intelligence' && <CompanyIntelligencePage />}
-            {section === 'linkedin_intelligence' && <LinkedInIntelligencePage />}
             {section === 'markets' && <MarketsPage onNavigate={setSection} />}
             {section === 'followups'  && <FollowUpPanel />}
             {section === 'nurture'    && <NurturePanel />}
-            {section === 'analytics'  && <AnalyticsSection />}
-            {section === 'import'     && <CsvImportSection />}
             {section === 'existing_clients' && <ExistingClientsSection />}
             {section === 'backup'     && <BackupRestoreSection />}
             {section === 'logs'       && <ActivityLogPanel />}
+            </>}
           </main>
 
           <LeadDetailPanel />
@@ -410,19 +417,10 @@ function ResearchQueueSection() {
 
     let cancelled = false
     async function poll() {
-      const [evidenceRows, pages] = await Promise.all([
-        searchEvidenceRepository.getByLeadId(runningJob.leadId),
-        sourcePageRepository.getByLeadId(runningJob.leadId),
-      ])
+      // researchService publishes live progress (current URL + counts) here.
+      const { research_activity } = await chrome.storage.local.get('research_activity')
       if (cancelled) return
-      const current = pages.find((p) => p.status === 'pending')
-      setActivity({
-        companyName: runningJob.companyName,
-        query: evidenceRows[0]?.query,
-        currentSourceUrl: current?.url,
-        completed: pages.filter((p) => p.status === 'extracted').length,
-        failed: pages.filter((p) => p.status === 'failed').length,
-      })
+      setActivity(research_activity ?? { companyName: runningJob.companyName, completed: 0, failed: 0 })
     }
     poll()
     const interval = setInterval(poll, 3000)
@@ -493,6 +491,9 @@ function ResearchQueueSection() {
 
   return (
     <div className="flex-1 flex flex-col gap-4 min-h-0">
+
+      {/* Import a company list straight into the research queue */}
+      <ImportPanel mode="research" />
 
       {/* API key status banner */}
       {loaded && apiKeySource === 'none' && (

@@ -14,6 +14,7 @@ import { visitAndExtract, SOURCE_VISIT_PRIORITY } from './sourcePageService'
 import { rankAndSelect } from './evidenceRanker'
 import { enqueueLiScrape } from './linkedinScraperService'
 import { aggregateCompanyResearch, mapToLegacyResearchResult, mergeSourcePages } from './companyResearchAggregator'
+import { syncDerivedLeads } from './derivedLeadsService'
 import type { SearchEvidence, SourcePage } from '@/types/searchEvidence'
 import type { FlatExtractedData } from './evidenceExtractor'
 import type { Lead } from '@/types/lead'
@@ -32,6 +33,19 @@ export interface ResearchServiceConfig {
 }
 
 let isProcessing = false
+
+// Publishes live "what's happening right now" for the Research Queue page.
+// Phase 3 source data itself is batch-saved to MSSQL at the end of the job —
+// this is just the transient dashboard indicator (the old IndexedDB source-page
+// rows it used to read were removed when Phase 3 moved to MSSQL-only).
+async function setResearchActivity(
+  activity: { companyName: string; query?: string; currentSourceUrl?: string; completed: number; failed: number } | null,
+): Promise<void> {
+  try {
+    if (activity === null) await chrome.storage.local.remove('research_activity')
+    else await chrome.storage.local.set({ research_activity: activity })
+  } catch { /* storage unavailable — the indicator just won't update */ }
+}
 
 // Randomized pause between consecutive source visits within one lead's research.
 // LinkedIn needs a much longer cooldown — it rate-limits aggressively.
@@ -88,6 +102,7 @@ export async function processNextJob(config: ResearchServiceConfig): Promise<boo
   try {
     console.log(`${tag} 🚀 Starting job #${job.id} | provider: ${config.researchProvider}`)
     await researchJobRepository.updateStatus(job.id, 'running', { startedAt: nowISO() })
+    await setResearchActivity({ companyName: job.companyName, completed: 0, failed: 0 })
     await activityLogRepository.log('research_started', `Research started: ${job.companyName}`, job.sessionId)
 
     const lead = await leadRepository.getById(job.leadId)
@@ -258,7 +273,16 @@ export async function processNextJob(config: ResearchServiceConfig): Promise<boo
       const ev = toVisitFinal[i]
       console.log(`${tag} [${i + 1}/${toVisitFinal.length}] 📄 Visiting [${ev.detectedType}]: ${ev.url.slice(0, 80)}`)
 
-      // Write pending row so dashboard shows the URL being opened
+      // Publish live progress (current URL + completed/failed) for the Research Queue page
+      await setResearchActivity({
+        companyName: job.companyName,
+        query: evidence[0]?.query,
+        currentSourceUrl: ev.url,
+        completed: sourcePages.filter((p) => p.status === 'extracted').length,
+        failed: sourcePages.filter((p) => p.status === 'failed').length,
+      })
+
+      // (Legacy no-op — the sourcePages IndexedDB store was removed in v8; guarded so it can't throw)
       const pendingId = await sourcePageRepository.create({
         leadId:      job.leadId,
         evidenceId:  0,
@@ -359,6 +383,7 @@ export async function processNextJob(config: ResearchServiceConfig): Promise<boo
     })
 
     await leadRepository.updateStatus(lead.id!, 'research_completed')
+    syncDerivedLeads().catch(() => {})   // refresh the researched-leads table
 
     // 6b. Queue the LinkedIn deep-scrape (6-month company posts + every core
     // member's activity) when a company LinkedIn URL was discovered. The
@@ -408,6 +433,15 @@ export async function processNextJob(config: ResearchServiceConfig): Promise<boo
       console.log(`${tag} 🌐 Discovered website: ${discoveredWebsite}`)
     }
 
+    // Maps list cards give only a fragment ("Shop 34"). Research usually surfaces a
+    // fuller address (registered office / directory / AI-mode answer) — write it back
+    // when it is more complete than what capture stored, so exports show the full address.
+    const researchedAddress = ((companyResearchData as { address?: string }).address || aiValidation?.fields.address || '').trim()
+    if (researchedAddress && researchedAddress.length > (lead.address?.trim().length ?? 0)) {
+      await leadRepository.updateMany([lead.id!], { address: researchedAddress }).catch(() => {})
+      console.log(`${tag} 📍 Address updated from research: ${researchedAddress.slice(0, 80)}`)
+    }
+
     await activityLogRepository.log(
       'research_completed',
       `Research completed: ${job.companyName} via ${config.researchProvider} (confidence: ${Math.round((merged.confidence ?? 0) * 100)}%, ${sourcePages.length} sources visited)`,
@@ -431,6 +465,7 @@ export async function processNextJob(config: ResearchServiceConfig): Promise<boo
     await activityLogRepository.log('research_failed', `Research failed: ${job.companyName} — ${msg}`, job.sessionId)
     return false
   } finally {
+    await setResearchActivity(null)   // clear the live indicator on every exit path
     isProcessing = false
   }
 }

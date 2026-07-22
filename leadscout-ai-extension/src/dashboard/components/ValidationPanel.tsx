@@ -34,7 +34,7 @@ const SETTINGS_PATH: Record<ValidationProvider, string> = {
 
 export default function ValidationPanel() {
   const { settings, load: reloadSettings } = useSettingsStore()
-  const { loadLeads } = useLeadStore()
+  const { loadLeads, projectScope } = useLeadStore()
 
   // Business Profile editing — persists to appsettings.json's App:BusinessProfile
   // via the DeepLead API (the extension has no local storage for this field).
@@ -111,8 +111,15 @@ export default function ValidationPanel() {
     if (!hasProfile) { toast.warning('Set your Business Profile in Settings first'); return }
     if (!hasKey)     { toast.warning(`Add an API key in ${SETTINGS_PATH[provider]}`); return }
 
-    const allLeads = await leadRepository.getAll()
-    if (allLeads.length === 0) { toast.warning('No leads in database to validate'); return }
+    // Respect the active Search Session scope — validate only this session's
+    // leads, not the entire database.
+    const allLeads = projectScope
+      ? await leadRepository.getByFilter({ projectId: projectScope.id })
+      : await leadRepository.getAll()
+    if (allLeads.length === 0) {
+      toast.warning(projectScope ? `No leads in session "${projectScope.name}" to validate` : 'No leads in database to validate')
+      return
+    }
 
     setState('running')
     setProgress({ done: 0, total: allLeads.length })
@@ -265,8 +272,10 @@ export default function ValidationPanel() {
           <div>
             <h3 className="font-semibold text-white text-sm">AI Lead Validation</h3>
             <p className="text-xs text-gray-500 mt-1">
-              Automatically validate all leads against your business profile.
-              Relevant leads are added here; irrelevant ones are tagged "Not Relevant".
+              {projectScope
+                ? <>Validates leads in session <span className="text-purple-300 font-medium">◈ {projectScope.name}</span> against your business profile.</>
+                : <>Validates all leads against your business profile.</>}
+              {' '}Relevant leads are added here; irrelevant ones are tagged "Not Relevant".
             </p>
           </div>
         </div>

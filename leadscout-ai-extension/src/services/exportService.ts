@@ -113,6 +113,25 @@ ${sections}
 // ─── PDF Export ───────────────────────────────────────────────────────────────
 // Opens a print-optimised window. One lead per page. Browser File → Save as PDF.
 
+// Builds the fullest available address. Google Maps list cards often yield only
+// a fragment (e.g. "Shop 34"), so we append the research 'headquarters' region,
+// merging in only the parts not already present to avoid "Indore, Indore".
+function composeAddress(lead: Lead | undefined, headquarters: string | undefined): string {
+  const bits: string[] = []
+  const street = lead?.address?.trim()
+  if (street) bits.push(street)
+
+  const hq = headquarters?.trim()
+  if (hq) {
+    const existing = bits.join(', ').toLowerCase()
+    const newParts = hq.split(',').map((s) => s.trim()).filter((p) => p && !existing.includes(p.toLowerCase()))
+    if (newParts.length) bits.push(newParts.join(', '))
+  }
+
+  if (bits.length === 0 && lead?.city) bits.push(lead.city.trim())
+  return bits.join(', ')
+}
+
 export function exportToPdf(results: EnrichedResult[]): void {
   const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
 
@@ -141,15 +160,25 @@ export function exportToPdf(results: EnrichedResult[]): void {
       return `<div class="kv"><span class="kv-label">${label}</span><span class="kv-value">${esc(value)}${badge}</span></div>`
     }
 
+    // Full-width row — label on its own line, value wraps freely below.
+    // Used for long values (address) so nothing is clipped or squeezed.
+    function kvWide(label: string, value: string | undefined | null) {
+      if (!value) return ''
+      return `<div class="kv-wide"><span class="kv-label">${label}</span><span class="kv-value">${esc(value)}</span></div>`
+    }
+
     const estBadge = (verified: boolean | undefined) =>
       verified === false ? ' <span class="est">Est.</span>' : verified ? ' <span class="ok">✓</span>' : ''
 
+    const displayName = lead?.companyName ?? `Lead #${r.leadId}`
     return `
-<div class="lead-page">
+<section class="lead-page">
+  <div class="lp-body">
   <!-- Header -->
   <div class="lead-header">
     <div class="lead-header-left">
-      <h1>${esc(lead?.companyName ?? `Lead #${r.leadId}`)}</h1>
+      <div class="eyebrow">LeadScout &middot; Research Dossier</div>
+      <h1>${esc(displayName)}</h1>
       <div class="meta">${esc(lead?.city ?? '')}${lead?.category ? ` &middot; ${esc(lead.category)}` : lead?.keyword ? ` &middot; ${esc(lead.keyword)}` : ''}</div>
       <div class="chips">${chips}${icpBadge}${confBadge}</div>
     </div>
@@ -172,7 +201,7 @@ export function exportToPdf(results: EnrichedResult[]): void {
         ${kv('Email', r.email)}
         ${kv('WhatsApp', r.whatsapp ? r.whatsapp.replace('https://wa.me/', '') : undefined)}
         ${kv('Website', r.website ?? lead?.website)}
-        ${kv('Address', lead?.address)}
+        ${kvWide('Address', composeAddress(lead, r.headquarters ?? undefined))}
       `)}
 
       ${section2('Enrichment', `
@@ -219,7 +248,13 @@ export function exportToPdf(results: EnrichedResult[]): void {
     <div class="section-title">Sources</div>
     ${r.sources.map((s) => `<div class="source-row"><span class="source-label">${esc(s.label)}</span><span class="source-url">${esc(s.url)}</span></div>`).join('')}
   </div>` : r.sourceUrl ? `<div class="sources"><span class="source-label">Source: </span><span class="source-url">${esc(r.sourceUrl)}</span></div>` : ''}
-</div>`
+  </div>
+  <footer class="lead-foot">
+    <span class="lf-brand">LeadScout <span>Research Dossier</span></span>
+    <span class="lf-name">${esc(displayName)}</span>
+    <span class="lf-date">${date}</span>
+  </footer>
+</section>`
   }).join('\n')
 
   const html = `<!DOCTYPE html>
@@ -231,19 +266,22 @@ export function exportToPdf(results: EnrichedResult[]): void {
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, Arial, sans-serif; font-size: 9pt; color: #1a1a1a; background: #fff; }
 
-  /* Each lead starts on a fresh page */
+  /* Each lead is its own page; flex column pins the footer near the bottom */
   .lead-page {
     page-break-after: always;
-    padding: 1.2cm 1.5cm;
-    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    min-height: 24.5cm;
   }
   .lead-page:last-child { page-break-after: avoid; }
+  .lp-body { flex: 1 1 auto; }
 
   /* Header */
-  .lead-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 8px; }
+  .lead-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 10px; border-bottom: 2px solid #1a56db; margin-bottom: 12px; }
   .lead-header-left { flex: 1; min-width: 0; }
-  h1 { font-size: 16pt; color: #1a56db; margin-bottom: 3px; }
-  .meta { font-size: 9pt; color: #666; margin-bottom: 6px; }
+  .eyebrow { font-size: 7pt; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: #1a56db; margin-bottom: 3px; }
+  h1 { font-size: 17pt; color: #0f2b5b; letter-spacing: -0.01em; margin-bottom: 3px; line-height: 1.15; }
+  .meta { font-size: 9pt; color: #64748b; margin-bottom: 6px; }
   .chips { display: flex; flex-wrap: wrap; gap: 4px; }
   .chip { font-size: 7.5pt; padding: 2px 7px; background: #f0f4ff; border: 1px solid #c7d7fb; border-radius: 999px; color: #1a56db; }
   .badge { font-size: 7.5pt; padding: 2px 7px; border-radius: 999px; border: 1px solid; }
@@ -251,7 +289,7 @@ export function exportToPdf(results: EnrichedResult[]): void {
   .badge.conf { background: #f9fafb; border-color: #d1d5db; color: #555; }
 
   /* ICP circle */
-  .icp-circle { width: 56px; height: 56px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 2.5px solid; shrink: 0; margin-left: 12px; }
+  .icp-circle { width: 56px; height: 56px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 2.5px solid; flex-shrink: 0; margin-left: 16px; }
   .icp-circle.hi { border-color: #10b981; background: #ecfdf5; }
   .icp-circle.med { border-color: #3b82f6; background: #eff6ff; }
   .icp-circle.lo { border-color: #f59e0b; background: #fffbeb; }
@@ -265,16 +303,21 @@ export function exportToPdf(results: EnrichedResult[]): void {
   .summary { color: #333; font-size: 9pt; line-height: 1.55; margin-bottom: 12px; background: #f9fafb; border-left: 3px solid #3b82f6; padding: 8px 12px; border-radius: 0 4px 4px 0; }
 
   /* Two column layout */
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 12px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-bottom: 12px; align-items: start; }
 
   /* Sections */
-  .section { margin-bottom: 10px; }
-  .section-title { font-size: 7pt; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin-bottom: 5px; }
+  .section { margin-bottom: 12px; break-inside: avoid; }
+  .section-title { font-size: 7pt; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8; margin-bottom: 5px; padding-bottom: 3px; border-bottom: 1px solid #e2e8f0; }
 
-  /* Key-value rows */
-  .kv { display: flex; gap: 6px; font-size: 8.5pt; margin-bottom: 3px; }
-  .kv-label { color: #888; min-width: 100px; shrink: 0; }
-  .kv-value { color: #111; font-weight: 500; }
+  /* Key-value rows — a grid keeps every label and value aligned in a column */
+  .kv { display: grid; grid-template-columns: 96px 1fr; gap: 2px 10px; font-size: 8.5pt; padding: 3px 0; border-bottom: 1px solid #f1f5f9; }
+  .kv:last-child { border-bottom: 0; }
+  .kv-label { color: #64748b; }
+  .kv-value { color: #0f172a; font-weight: 500; word-break: break-word; }
+  /* Full-width row (address) — label above, value wraps freely below, never clipped */
+  .kv-wide { font-size: 8.5pt; padding: 4px 0; border-bottom: 1px solid #f1f5f9; }
+  .kv-wide .kv-label { display: block; color: #64748b; margin-bottom: 1px; }
+  .kv-wide .kv-value { display: block; color: #0f172a; font-weight: 500; line-height: 1.45; word-break: break-word; }
   .kv-block { margin-bottom: 8px; }
   .mono { font-family: monospace; font-size: 7.5pt; color: #444; }
 
@@ -299,28 +342,34 @@ export function exportToPdf(results: EnrichedResult[]): void {
   /* Team grid */
   .team-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .team-card { display: flex; align-items: center; gap: 8px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 6px 10px; }
-  .avatar { width: 28px; height: 28px; border-radius: 50%; background: #4f46e5; color: #fff; font-weight: 700; font-size: 11pt; display: flex; align-items: center; justify-content: center; shrink: 0; }
+  .avatar { width: 28px; height: 28px; border-radius: 50%; background: #4f46e5; color: #fff; font-weight: 700; font-size: 11pt; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
   .tm-name { font-size: 8.5pt; font-weight: 600; color: #111; }
   .tm-role { font-size: 7.5pt; color: #777; }
 
   /* Sources */
   .sources { margin-top: 8px; border-top: 1px solid #e5e7eb; padding-top: 6px; }
   .source-row { display: flex; gap: 8px; font-size: 7.5pt; margin-bottom: 2px; }
-  .source-label { color: #888; min-width: 80px; shrink: 0; }
+  .source-label { color: #64748b; min-width: 80px; flex-shrink: 0; }
   .source-url { color: #1a56db; word-break: break-all; }
 
-  /* Print adjustments */
+  /* Per-page footer */
+  .lead-foot { margin-top: 14px; padding-top: 6px; border-top: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; font-size: 7pt; color: #94a3b8; }
+  .lead-foot .lf-brand { font-weight: 700; color: #64748b; letter-spacing: 0.02em; }
+  .lead-foot .lf-brand span { font-weight: 400; color: #94a3b8; }
+  .team-card, .kv, .kv-wide, .pills, .bullet-list { break-inside: avoid; }
+
+  /* Print geometry — consistent margins on every page */
+  @page { size: A4; margin: 1.3cm 1.4cm; }
   @media print {
     body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .lead-page { padding: 0.8cm 1.2cm; }
+    .no-print { display: none !important; }
   }
 </style>
 </head>
 <body>
-<div style="padding:0.8cm 1.5cm 0.4cm; border-bottom:2px solid #1a56db; margin-bottom:0;">
-  <span style="font-size:13pt;font-weight:700;color:#1a56db;">LeadScout</span>
-  <span style="font-size:9pt;color:#888;margin-left:12px;">Research Results Export · ${results.length} leads · ${date}</span>
-  <span style="float:right;font-size:8pt;color:#aaa;">File → Print → Save as PDF</span>
+<div class="no-print" style="padding:10px 16px;background:#f1f5f9;border-bottom:1px solid #cbd5e1;font-family:-apple-system,Arial,sans-serif;font-size:9pt;color:#475569;">
+  <strong style="color:#1a56db;">LeadScout</strong> — ${results.length} lead${results.length === 1 ? '' : 's'} &middot; ${date}
+  <span style="float:right;color:#94a3b8;">Choose <strong>Save as PDF</strong> as the destination in the print dialog</span>
 </div>
 ${sections}
 </body>

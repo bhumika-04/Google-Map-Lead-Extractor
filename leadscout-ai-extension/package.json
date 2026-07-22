@@ -13,6 +13,7 @@
     "dexie": "^3.2.4",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "xlsx": "^0.18.5",
     "zustand": "^4.4.7"
   },
   "devDependencies": {

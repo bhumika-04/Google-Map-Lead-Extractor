@@ -65,13 +65,17 @@ const SELECTORS = {
     '[data-item-id="address"]',
   ],
   phone: [
+    'span.UsdlK',
     '[data-tooltip="Copy phone number"]',
     '[data-item-id*="phone"]',
-    'span[aria-label*="phone"]',
+    'span[aria-label*="phone" i]',
   ],
   website: [
+    'a[data-value="Website"]',
+    'a.lcr4fd[href^="http"]',
+    'a[aria-label*="Website" i]',
     'a[data-item-id="authority"]',
-    'a[href^="http"]:not([href*="google.com"])',
+    'a[href^="http"]:not([href*="google."]):not([href*="goo.gl"]):not([href*="gstatic"])',
   ],
   mapsLink: [
     'a.hfpxzc',
@@ -124,14 +128,78 @@ function parsePhoneFromText(text: string): string | undefined {
   return best ?? (clean[0]?.replace(/\D/g, '').length >= 7 ? clean[0] : undefined)
 }
 
+// Stricter phone picker: returns the best phone-shaped candidate in `text`,
+// requiring 8-15 digits and preferring 10-13 (mobiles / STD landlines). Rejects
+// short fragments — fixes the "only 5 digits captured" bug where a partial number
+// or a pincode/price was accepted.
+function normalizePhone(text?: string | null): string | undefined {
+  if (!text) return undefined
+  const cleanedInput = text.replace(/phone:?/i, '').replace(/copy phone number/i, '')
+  const matches = cleanedInput.match(PHONE_RE)
+  if (!matches) return undefined
+  const candidates = matches
+    .map((m) => ({ raw: m.replace(/\s+/g, ' ').trim(), digits: m.replace(/\D/g, '') }))
+    .filter((c) => c.digits.length >= 8 && c.digits.length <= 15)
+  if (candidates.length === 0) return undefined
+  const score = (d: string) => (d.length >= 10 && d.length <= 13 ? 100 + d.length : d.length)
+  candidates.sort((a, b) => score(b.digits) - score(a.digits))
+  return candidates[0].raw
+}
+
+// Google sometimes wraps an external website in a redirect
+// (https://www.google.com/url?q=https://realsite.com&…) — unwrap to the real URL
+// so it isn't wrongly rejected as a "google.com" link (a big cause of missed websites).
+function unwrapGoogleUrl(href: string): string {
+  try {
+    const u = new URL(href, location.href)
+    if (/(^|\.)google\.[a-z.]+$/i.test(u.hostname) && (u.pathname === '/url' || u.pathname.startsWith('/aclk'))) {
+      const real = u.searchParams.get('q') || u.searchParams.get('url')
+      if (real) return real
+    }
+  } catch { /* not a parseable URL */ }
+  return href
+}
+
+// Returns a real external website URL, or undefined if the href is a Google/asset
+// link. Unwraps redirects first.
+function cleanWebsite(href?: string | null): string | undefined {
+  if (!href) return undefined
+  const url = unwrapGoogleUrl(href.trim())
+  if (!/^https?:\/\//i.test(url)) return undefined
+  if (/google\.[a-z.]+|goo\.gl|gstatic\.com|ggpht\.com|maps\.app|schema\.org|w3\.org/i.test(url)) return undefined
+  return url
+}
+
 /**
  * Strip opening-hours status and phone numbers from a raw Google Maps card
  * address row.  The Maps DOM emits text like:
  *   "Print shop · 52, Shani Mandir RdOpen · Closes 9:30 pm · 098933 68152"
  * After cleaning we get: "52, Shani Mandir Rd"
  */
+// Strips Google Maps icon-font glyphs, emoji, and replacement boxes that leak
+// into scraped text (e.g. a leading "□" rendered before a street address).
+function stripJunkGlyphs(s: string): string {
+  let out = ''
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0
+    const junk =
+      (cp >= 0xE000 && cp <= 0xF8FF) ||   // private-use icon fonts (Material icons)
+      cp === 0xFFFC || cp === 0xFFFD || cp === 0xFE0F ||
+      (cp >= 0x2190 && cp <= 0x21FF) ||   // arrows
+      (cp >= 0x2300 && cp <= 0x27BF) ||   // misc technical / dingbats
+      (cp >= 0x2B00 && cp <= 0x2BFF) ||   // misc symbols & arrows
+      (cp >= 0x25A0 && cp <= 0x25FF) ||   // geometric shapes (boxes)
+      (cp >= 0x1F000 && cp <= 0x1FAFF)    // emoji
+    if (!junk) out += ch
+  }
+  return out
+}
+
 function cleanAddressText(raw: string): string {
-  let s = raw
+  let s = stripJunkGlyphs(raw)
+    // Cut everything from the first opening-hours marker onward — handles glued
+    // text like "73-74Closed Wed" and "…RdOpen · Closes 9 pm".
+    .replace(/\s*[·⋅]?\s*(?:Opens?|Close[sd])(?=$|\s|[·⋅]|\d).*$/is, '')
     // Hours/status strings (may be preceded by ·)
     .replace(/\s*·?\s*Open\s+now\s*/gi, ' ')
     .replace(/\s*·?\s*Closes?\s+\d[\d:]*\s*(?:am|pm)\s*/gi, ' ')
@@ -184,6 +252,7 @@ function extractCardData(card: Element): RawBusinessCard | null {
     ])
     if (nameEl) companyName = nameEl.textContent?.trim() ?? ''
   }
+  companyName = stripJunkGlyphs(companyName).trim()
   if (!companyName) return null
 
   // Maps URL — from mainLink or any maps/place link
@@ -209,32 +278,44 @@ function extractCardData(card: Element): RawBusinessCard | null {
     if (text && text.length < 80 && !text.match(/^\d/)) category = text
   }
 
-  // Address — heuristic: row containing digits, long enough to be an address
+  // Address — score every info row and keep the most address-like one, instead
+  // of blindly taking the first row with a digit (which grabbed the rating/hours
+  // row and produced junk like "Shop 34").
   let address: string | undefined
-  const infoRows = card.querySelectorAll('.W4Efsd')
-  for (const row of Array.from(infoRows)) {
-    const text = row.textContent?.trim() ?? ''
-    if (text.match(/\d/) && text.length > 10 && text.length < 200) {
-      address = cleanAddressText(text)
-      break
+  {
+    const infoRows = Array.from(card.querySelectorAll('.W4Efsd'))
+    let bestScore = -1
+    for (const row of infoRows) {
+      const cleaned = cleanAddressText(row.textContent ?? '')
+      if (cleaned.length < 6 || cleaned.length > 220) continue
+      let score = Math.min(cleaned.length, 60) / 60
+      if (/\d/.test(cleaned)) score += 1
+      if (/,/.test(cleaned)) score += 1
+      if (/(rd\b|road|nagar|colony|chowk|market|marg|sector|lane|street|st\b|ave|avenue|near|opp|behind|floor|shop|plot|block|phase|building|complex|tower|highway|cross|main|pin|\d{6})/i.test(cleaned)) score += 2
+      if (score > bestScore) { bestScore = score; address = cleaned }
     }
   }
 
-  // Phone — try DOM selectors first, then parse from rawText
+  // Phone — prefer the dedicated phone span, then phone-labelled elements, then
+  // card text. Everything is run through normalizePhone so partial/short numbers
+  // are rejected (fixes the "only 5 digits" bug).
   let phone: string | undefined
-  const phoneEl = tryQuerySelector(card, SELECTORS.phone) as HTMLElement | null
-  if (phoneEl) {
-    phone = phoneEl.getAttribute('data-tooltip')?.replace('Copy phone number', '').trim()
-      ?? phoneEl.getAttribute('aria-label')?.replace(/phone:/i, '').trim()
-      ?? phoneEl.textContent?.trim()
+  const phoneSpan = card.querySelector('span.UsdlK') as HTMLElement | null
+  phone = normalizePhone(phoneSpan?.textContent)
+  if (!phone) {
+    const phoneEl = tryQuerySelector(card, SELECTORS.phone) as HTMLElement | null
+    if (phoneEl) {
+      phone = normalizePhone(phoneEl.getAttribute('aria-label'))
+        ?? normalizePhone(phoneEl.getAttribute('data-tooltip'))
+        ?? normalizePhone(phoneEl.textContent)
+    }
   }
-  // Fallback: extract phone from visible card text (catches list-view phone numbers)
-  if (!phone) phone = parsePhoneFromText(rawText)
+  if (!phone) phone = normalizePhone(rawText)
 
-  // Website
+  // Website — unwrap Google redirect links so real sites aren't dropped.
   let website: string | undefined
   const websiteEl = tryQuerySelector(card, SELECTORS.website) as HTMLAnchorElement | null
-  if (websiteEl?.href && !websiteEl.href.includes('google.com')) website = websiteEl.href
+  website = cleanWebsite(websiteEl?.getAttribute('href'))
 
   return { companyName, category, rating, reviewCount, address, phone, website, googleMapsUrl, rawText }
 }
@@ -262,46 +343,44 @@ export function extractDetailPanelData(): Partial<RawBusinessCard> {
 
   // Phone — button with phone aria-label or data-item-id
   const phoneEl =
-    panel.querySelector('[data-item-id*="phone"]') ??
-    panel.querySelector('[aria-label*="Phone"]') ??
+    panel.querySelector('[data-item-id^="phone"]') ??
+    panel.querySelector('button[aria-label*="Phone" i]') ??
     panel.querySelector('[data-tooltip="Copy phone number"]')
   if (phoneEl) {
-    const raw = phoneEl.getAttribute('aria-label') ??
-      phoneEl.getAttribute('data-tooltip') ??
-      phoneEl.textContent ?? ''
-    const cleaned = raw.replace(/phone:/i, '').replace(/copy phone number/i, '').trim()
-    if (cleaned) result.phone = cleaned
+    // data-item-id is the most reliable: "phone:tel:+91 98933 68152"
+    const itemId = phoneEl.getAttribute('data-item-id')
+    result.phone = normalizePhone(itemId)
+      ?? normalizePhone(phoneEl.getAttribute('aria-label'))
+      ?? normalizePhone(phoneEl.getAttribute('data-tooltip'))
+      ?? normalizePhone(phoneEl.textContent)
   }
   if (!result.phone) {
-    result.phone = parsePhoneFromText(panel.textContent ?? '')
+    result.phone = normalizePhone(panel.textContent ?? '')
   }
 
-  // Website — authority link
-  const websiteEl = panel.querySelector('a[data-item-id="authority"]') as HTMLAnchorElement | null
-  if (websiteEl?.href && !websiteEl.href.includes('google.com')) {
-    result.website = websiteEl.href
-  }
+  // Website — authority link (unwrap redirects), then any non-Google external link.
+  const websiteEl = panel.querySelector('a[data-item-id="authority"], a[data-value="Website"]') as HTMLAnchorElement | null
+  result.website = cleanWebsite(websiteEl?.getAttribute('href'))
   if (!result.website) {
-    const anyLink = Array.from(panel.querySelectorAll('a[href^="http"]')).find(
-      (a) => {
-        const href = (a as HTMLAnchorElement).href
-        return !href.includes('google.com') && !href.includes('goo.gl') && !href.includes('maps.app')
-      }
-    ) as HTMLAnchorElement | null
-    if (anyLink) result.website = anyLink.href
+    for (const a of Array.from(panel.querySelectorAll('a[href^="http"]'))) {
+      const w = cleanWebsite((a as HTMLAnchorElement).getAttribute('href'))
+      if (w) { result.website = w; break }
+    }
   }
 
   // Email — mailto links
   const emailEl = panel.querySelector('a[href^="mailto:"]') as HTMLAnchorElement | null
   if (emailEl) result.rawText = emailEl.href.replace('mailto:', '').trim()
 
-  // Address
+  // Address — the detail panel carries the FULL address (list cards truncate it).
   const addrEl =
+    panel.querySelector('button[data-item-id="address"]') ??
     panel.querySelector('[data-item-id="address"]') ??
-    panel.querySelector('[aria-label*="Address"]')
+    panel.querySelector('[aria-label*="Address" i]')
   if (addrEl) {
-    const text = addrEl.getAttribute('aria-label')?.replace(/address:/i, '').trim()
-      ?? addrEl.textContent?.trim()
+    let text = (addrEl.getAttribute('aria-label')?.replace(/^\s*address:?/i, '').trim())
+      || addrEl.textContent?.trim() || ''
+    text = cleanAddressText(text)
     if (text) result.address = text
   }
 

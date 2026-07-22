@@ -1,5 +1,8 @@
 export interface BatchCampaignCity {
   city: string
+  /** ISO country code for THIS city — lets one campaign span multiple countries.
+   *  Falls back to the campaign-level `country` when absent (older records). */
+  country?: string
   status: 'pending' | 'running' | 'completed' | 'failed'
   capturedCount: number
   startedAt?: string

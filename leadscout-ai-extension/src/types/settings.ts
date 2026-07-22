@@ -95,7 +95,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoValidate: true,
   autoResearchTopN: 0,              // 0 = all relevant leads (not just top N)
   autoStartResearchAfterValidation: true,
-  theme: 'dark',
+  theme: 'light',
   interaktApiKey: '',
   interaktTemplateName: '',
   interaktCountryCode: '+91',

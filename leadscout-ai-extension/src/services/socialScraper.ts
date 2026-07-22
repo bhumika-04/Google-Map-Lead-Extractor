@@ -34,12 +34,67 @@ const ACTIVITY_TAB_TIMEOUT_MS = 120000
 // Kept for backward-compat export — actual LinkedIn visits use fetchLinkedInHtml
 export const LINKEDIN_RENDER_MS = LINKEDIN_RENDER_MS_MIN
 
+// ─── Scraper tab registry ─────────────────────────────────────────────────────
+// Every background tab the scraper opens is recorded in chrome.storage.local and
+// removed when closed. MV3 terminates the service worker aggressively; if it dies
+// mid-fetch the finally-close never runs and the tab is orphaned. Over a long
+// multi-city/keyword run those pile up into "too many tabs" / tab-access /
+// forbidden errors. sweepOrphanScraperTabs() (run on every research tick) closes
+// the leftovers so tabs can never accumulate.
+const SCRAPER_TABS_KEY = 'scraper_open_tabs'
+
+async function registerScraperTab(tabId: number): Promise<void> {
+  try {
+    const data = await chrome.storage.local.get(SCRAPER_TABS_KEY)
+    const list = (data[SCRAPER_TABS_KEY] as Array<{ id: number; ts: number }>) ?? []
+    list.push({ id: tabId, ts: Date.now() })
+    await chrome.storage.local.set({ [SCRAPER_TABS_KEY]: list })
+  } catch { /* storage unavailable — sweep just won't have this id */ }
+}
+
+async function unregisterScraperTab(tabId: number): Promise<void> {
+  try {
+    const data = await chrome.storage.local.get(SCRAPER_TABS_KEY)
+    const list = (data[SCRAPER_TABS_KEY] as Array<{ id: number; ts: number }>) ?? []
+    const next = list.filter((t) => t.id !== tabId)
+    if (next.length !== list.length) await chrome.storage.local.set({ [SCRAPER_TABS_KEY]: next })
+  } catch { /* ignore */ }
+}
+
+// Closes background scraper tabs orphaned by a killed service worker. Only touches
+// tabs older than maxAgeMs (a live fetch never runs that long) that are still in the
+// background (active:false) — so it can never close a tab that's in use or a
+// foreground user tab. Entries for tabs already gone are dropped from the registry.
+export async function sweepOrphanScraperTabs(maxAgeMs = 180000): Promise<number> {
+  try {
+    const data = await chrome.storage.local.get(SCRAPER_TABS_KEY)
+    const list = (data[SCRAPER_TABS_KEY] as Array<{ id: number; ts: number }>) ?? []
+    if (list.length === 0) return 0
+    const now = Date.now()
+    const keep: Array<{ id: number; ts: number }> = []
+    let closed = 0
+    for (const t of list) {
+      if (now - t.ts < maxAgeMs) { keep.push(t); continue }   // still possibly in use — keep
+      const tab = await chrome.tabs.get(t.id).catch(() => null)
+      if (tab && tab.active === false) {
+        await chrome.tabs.remove(t.id).catch(() => {})
+        closed++
+      }
+      // whether closed or already gone, it drops out of the registry
+    }
+    await chrome.storage.local.set({ [SCRAPER_TABS_KEY]: keep })
+    if (closed > 0) console.log(`[scraper-tabs] 🧹 Closed ${closed} orphaned scraper tab(s)`)
+    return closed
+  } catch { return 0 }
+}
+
 function openTab(url: string): Promise<number> {
   return new Promise((resolve, reject) => {
     chrome.tabs.create({ url, active: false }, (tab) => {
       if (chrome.runtime.lastError || !tab.id) {
         reject(new Error(chrome.runtime.lastError?.message ?? 'Tab creation failed'))
       } else {
+        void registerScraperTab(tab.id)
         resolve(tab.id)
       }
     })
@@ -66,6 +121,7 @@ function waitForLoad(tabId: number, timeoutMs = TAB_LOAD_TIMEOUT_MS, renderWaitM
 }
 
 function closeTab(tabId: number): Promise<void> {
+  void unregisterScraperTab(tabId)
   return chrome.tabs.remove(tabId).catch(() => {})
 }
 

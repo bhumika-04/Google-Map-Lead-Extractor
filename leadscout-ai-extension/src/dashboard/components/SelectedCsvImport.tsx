@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react'
-import { parseCSV, mapRow } from './CsvImportSection'
+import { parseCSV, mapRow } from '@/utils/csvImport'
 import { leadRepository } from '@/db/leadRepository'
 import { isDuplicate } from '@/utils/dedupe'
 import { addToResearchQueue } from '@/services/futureResearchService'

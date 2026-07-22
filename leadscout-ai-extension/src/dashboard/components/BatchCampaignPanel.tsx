@@ -5,7 +5,8 @@ import { createCampaign, getAllCampaigns, deleteCampaign } from '@/services/batc
 import { toast } from '@/state/useToastStore'
 import { useSettingsStore } from '@/state/useSettingsStore'
 import { timeAgo } from '@/utils/date'
-import { COUNTRIES, flag } from './SearchConsole'
+import { COUNTRIES, flag, CityMultiSelect } from './SearchConsole'
+import { fetchTopCities } from '@/services/cityService'
 
 export default function BatchCampaignPanel() {
   const [campaigns, setCampaigns] = useState<BatchCampaign[]>([])
@@ -15,10 +16,13 @@ export default function BatchCampaignPanel() {
 
   const { settings } = useSettingsStore()
 
-  // Form state
+  // Form state — a campaign can now span multiple countries. `entries` is the
+  // full {city, country} list; `country` is just the country currently being
+  // added to via the picker below.
   const [keyword, setKeyword] = useState('')
-  const [citiesText, setCitiesText] = useState('')
+  const [entries, setEntries] = useState<{ city: string; country: string }[]>([])
   const [country, setCountry] = useState(settings.lastCountry || 'IN')
+  const [fetchingTier, setFetchingTier] = useState<number | null>(null)
   const [autoResearch, setAutoResearch] = useState(false)
   const [showForm, setShowForm] = useState(false)
 
@@ -46,17 +50,37 @@ export default function BatchCampaignPanel() {
     return () => clearInterval(interval)
   }, [])
 
-  function parseCities(text: string): string[] {
-    return text
-      .split(/[\n,]+/)
-      .map(s => s.trim())
-      .filter(Boolean)
+  // Cities chosen for the CURRENTLY-selected country (derived from the full list)
+  const currentCities = entries.filter(e => e.country === country).map(e => e.city)
+  function setCurrentCities(cs: string[]) {
+    setEntries([
+      ...entries.filter(e => e.country !== country),
+      ...cs.map(city => ({ city, country })),
+    ])
   }
 
+  // Dynamic AI quick-add for the current country — works for any country.
+  async function addTopCities(n: number) {
+    if (fetchingTier !== null) return
+    const countryName = COUNTRIES.find(c => c.code === country)?.name ?? country
+    setFetchingTier(n)
+    try {
+      const cities = await fetchTopCities(country, countryName, n, settings)
+      if (!cities.length) { toast.error(`No cities returned for ${countryName}`); return }
+      setCurrentCities([...new Set([...currentCities, ...cities])])
+      toast.success(`Added ${cities.length} top ${countryName} cities`)
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Could not fetch cities')
+    } finally {
+      setFetchingTier(null)
+    }
+  }
+
+  const countryCount = new Set(entries.map(e => e.country)).size
+
   async function handleStart() {
-    const cities = parseCities(citiesText)
     if (!keyword.trim()) { toast.error('Enter a keyword'); return }
-    if (cities.length < 2) { toast.error('Enter at least 2 cities'); return }
+    if (entries.length < 2) { toast.error('Add at least 2 cities'); return }
     if (activeCampaignId !== null) { toast.error('A campaign is already running — stop it first'); return }
 
     setStarting(true)
@@ -67,12 +91,13 @@ export default function BatchCampaignPanel() {
       // the campaign survives a service worker restart mid-run.
       const campaignId = await createCampaign({
         keyword: keyword.trim(),
-        cities: cities.map(city => ({
-          city,
+        cities: entries.map(e => ({
+          city: e.city,
+          country: e.country,          // per-city country → multi-country campaigns
           status: 'pending',
           capturedCount: 0,
         })),
-        country,
+        country: entries[0]?.country ?? country,   // primary country (session default)
         autoResearch,
       })
 
@@ -82,10 +107,10 @@ export default function BatchCampaignPanel() {
       })
 
       if (res?.ok) {
-        toast.success(`Campaign started — ${cities.length} cities queued`)
+        toast.success(`Campaign started — ${entries.length} cities queued`)
         setShowForm(false)
         setKeyword('')
-        setCitiesText('')
+        setEntries([])
         await refresh()
       } else {
         toast.error(res?.error ?? 'Failed to start campaign')
@@ -110,7 +135,7 @@ export default function BatchCampaignPanel() {
     await refresh()
   }
 
-  const cities = parseCities(citiesText)
+  const cities = entries
 
   return (
     <div className="flex-1 flex flex-col gap-4 min-h-0">
@@ -118,7 +143,7 @@ export default function BatchCampaignPanel() {
         <div>
           <h2 className="text-sm font-semibold text-white">Multi-City Batch Campaigns</h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            Search one keyword across multiple cities automatically — Maps opens, captures, closes, moves to next city
+            Search one keyword across many cities — and now across multiple countries — automatically. Maps opens, captures, closes, moves to the next city.
           </p>
         </div>
         <div className="flex gap-2 shrink-0">
@@ -159,43 +184,92 @@ export default function BatchCampaignPanel() {
               />
             </div>
 
-            <div className="col-span-2">
-              <label className="text-xs text-gray-400 block mb-1.5">
-                Cities <span className="text-gray-600">(one per line or comma-separated)</span>
-              </label>
-              <textarea
-                value={citiesText}
-                onChange={e => setCitiesText(e.target.value)}
-                rows={5}
-                placeholder={'Mumbai\nPune\nAhmedabad\nSurat\nIndore'}
-                className="w-full bg-gray-800 border border-gray-700 text-white text-sm px-3 py-2 rounded-lg
-                  focus:outline-none focus:border-blue-500 placeholder-gray-600 resize-none font-mono"
-              />
-              {cities.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {cities.map(c => (
-                    <span key={c} className="text-xs px-2 py-0.5 bg-blue-950 border border-blue-800 text-blue-300 rounded-full">
-                      {c}
+            {/* Country + cities — pick cities per country, across as many countries as you like */}
+            <div className="col-span-2 space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs text-gray-400 block mb-1.5">Country</label>
+                  <select
+                    value={country}
+                    onChange={e => setCountry(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 text-white text-sm px-3 py-2 rounded-lg
+                      focus:outline-none focus:border-blue-500"
+                  >
+                    {COUNTRIES.map(c => (
+                      <option key={c.code} value={c.code}>{flag(c.code)} {c.name}</option>
+                    ))}
+                  </select>
+                  <div className="text-xs text-gray-600 mt-1">Switch country and keep adding — each city is stamped with its own country.</div>
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="text-xs text-gray-400 block mb-1.5">
+                    Cities in {COUNTRIES.find(c => c.code === country)?.name ?? country}
+                  </label>
+                  <CityMultiSelect
+                    selected={currentCities}
+                    onChange={setCurrentCities}
+                    country={country}
+                  />
+                  <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[11px] text-gray-500">AI quick-add:</span>
+                    {[50, 100, 200, 500].map(n => (
+                      <button
+                        key={n}
+                        type="button"
+                        disabled={fetchingTier !== null}
+                        onClick={() => addTopCities(n)}
+                        className="text-xs px-2.5 py-1 rounded-full text-gray-300 border border-gray-700 bg-gray-800/60
+                          hover:border-indigo-500/50 hover:text-indigo-200 transition-all active:scale-95
+                          disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                      >
+                        {fetchingTier === n && (
+                          <span className="inline-block w-3 h-3 border-2 border-indigo-400/40 border-t-indigo-400 rounded-full animate-spin" />
+                        )}
+                        Top {n}
+                      </button>
+                    ))}
+                    {fetchingTier !== null && (
+                      <span className="text-[11px] text-gray-500 animate-pulse">Asking AI…</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Accumulated cities across all countries */}
+              {entries.length > 0 && (
+                <div className="bg-gray-800/40 border border-gray-700 rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-gray-400 font-medium">
+                      {entries.length} cities · {countryCount} countr{countryCount === 1 ? 'y' : 'ies'}
                     </span>
-                  ))}
-                  <span className="text-xs text-gray-600 self-center">{cities.length} cities</span>
+                    <button
+                      type="button"
+                      onClick={() => setEntries([])}
+                      className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1 max-h-40 overflow-auto">
+                    {entries.map((e, i) => (
+                      <span
+                        key={`${e.country}-${e.city}-${i}`}
+                        className="text-xs px-2 py-0.5 bg-blue-950 border border-blue-800 text-blue-300 rounded-full inline-flex items-center gap-1"
+                      >
+                        {flag(e.country)} {e.city}
+                        <button
+                          type="button"
+                          onClick={() => setEntries(entries.filter((_, j) => j !== i))}
+                          className="text-blue-400 hover:text-white leading-none"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
                 </div>
               )}
-            </div>
-
-            <div>
-              <label className="text-xs text-gray-400 block mb-1.5">Country</label>
-              <select
-                value={country}
-                onChange={e => setCountry(e.target.value)}
-                className="w-full bg-gray-800 border border-gray-700 text-white text-sm px-3 py-2 rounded-lg
-                  focus:outline-none focus:border-blue-500"
-              >
-                {COUNTRIES.map(c => (
-                  <option key={c.code} value={c.code}>{flag(c.code)} {c.name}</option>
-                ))}
-              </select>
-              <div className="text-xs text-gray-600 mt-1">Stamped on every captured lead — used for grouping, Google region &amp; AI prompts</div>
             </div>
 
             <div className="flex items-center gap-3">
@@ -299,7 +373,12 @@ function CampaignCard({ campaign, onDelete }: { campaign: BatchCampaign; onDelet
           <div className="flex items-center gap-2">
             {isRunning && <span className="text-blue-400 animate-pulse text-sm">●</span>}
             <span className="text-sm font-semibold text-white">{campaign.keyword}</span>
-            {campaign.country && <span className="text-xs">{flag(campaign.country)}</span>}
+            {Array.from(new Set(campaign.cities.map(c => c.country ?? campaign.country)))
+              .filter(Boolean)
+              .slice(0, 6)
+              .map((cc) => (
+                <span key={cc} className="text-xs" title={cc as string}>{flag(cc as string)}</span>
+              ))}
             <span className="text-xs text-gray-500">{total} cities</span>
           </div>
           <div className="text-xs text-gray-500 mt-0.5">
@@ -360,6 +439,7 @@ function CityChip({ city, isCurrent }: { city: BatchCampaignCity; isCurrent: boo
     <span className={`text-xs px-2 py-0.5 rounded-full border flex items-center gap-1 ${cls}`}>
       {isCurrent && <span className="text-blue-400">●</span>}
       {city.status === 'completed' && <span>✓</span>}
+      {city.country && <span>{flag(city.country)}</span>}
       {city.city}
       {city.status === 'completed' && city.capturedCount > 0 && (
         <span className="text-green-600">({city.capturedCount})</span>

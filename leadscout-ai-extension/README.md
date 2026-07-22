@@ -1,6 +1,6 @@
 # LeadScout AI — Chrome Extension
 
-Automated business lead discovery from Google Maps. Search by city and keyword from our dashboard — the extension opens Maps, captures all visible business listings, deduplicates them, and stores them in a local database.
+Automated B2B lead discovery, AI research, and outreach from Google Maps. Search by market / city / keyword, capture and deduplicate listings, validate against your ICP, run evidence-based AI research, and track outreach — all from one dashboard, backed by a local MSSQL API.
 
 ---
 
@@ -86,7 +86,7 @@ In **Lead Database**:
 |---|---|
 | ✓ (green) | Mark lead as Interested / Selected |
 | ✗ (red) | Mark lead as Not Relevant / Rejected |
-| ⚗ (purple) | Add to Research Queue (Phase 2 placeholder) |
+| ⚗ (purple) | Add to Research Queue (evidence-based AI research) |
 | ⌖ | Open in Google Maps |
 | × | Delete lead |
 
@@ -94,11 +94,14 @@ In **Lead Database**:
 
 ---
 
-## Export Leads
+## Import & Export Leads
 
-In **Lead Database** toolbar:
-- **CSV** — Export visible/selected leads as CSV
-- **JSON** — Export visible/selected leads as JSON
+**Import** — on **Lead Database**, **Selected Leads**, or **Research Queue**, drop a `.csv` / `.xlsx` / `.xls` file into the import panel and choose (or create) a **Session**. Imported rows are tagged to that session and follow the screen's pipeline (new leads · Selected · Selected + queued for research). Duplicate-safe.
+
+**Export** — in the **Lead Database** toolbar:
+- **CSV** / **JSON** — visible or selected leads
+- **DOC** — Word document
+- **PDF** — a professional one-lead-per-page research dossier (contact, enrichment, ICP score, key people, sources)
 
 Select specific leads first to export only those rows.
 
@@ -203,15 +206,16 @@ Each field has a prioritized array of CSS selectors — the extractor tries them
 
 ---
 
-## Phase 2 Roadmap
+## Feature Highlights
 
-- [ ] AI-powered company research (OpenAI / Claude API)
-- [ ] Decision maker discovery
-- [ ] Social profile extraction
-- [ ] Backend sync (MSSQL)
-- [ ] CRM export (HubSpot, Salesforce)
-- [ ] Email finding
-- [ ] Bulk research jobs
+- [x] AI-powered company research (Gemini / OpenAI / Claude) — evidence-based, source-by-source
+- [x] AI lead validation (ICP scoring) per Search Session
+- [x] Decision maker & team discovery, social profiles, email finding
+- [x] LinkedIn / social deep research → intent signals + pitch
+- [x] Backend sync to MSSQL (single source of truth) + JSON backup
+- [x] Named Search Sessions + a live per-session **Session Pipeline** page
+- [x] CSV / Excel import into a session · CSV / JSON / DOC / PDF export
+- [x] Outreach + nurture pipeline (WhatsApp via Interakt)
 
 ---
 

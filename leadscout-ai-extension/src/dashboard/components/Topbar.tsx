@@ -129,9 +129,9 @@ export default function Topbar({ section }: TopbarProps) {
         <button
           onClick={toggleTheme}
           title={isLight ? 'Switch to dark mode' : 'Switch to light mode'}
-          className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors text-base"
+          className="px-2.5 h-8 flex items-center justify-center rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors text-xs font-medium"
         >
-          {isLight ? '🌙' : '☀'}
+          {isLight ? 'Dark' : 'Light'}
         </button>
       </div>
     </header>

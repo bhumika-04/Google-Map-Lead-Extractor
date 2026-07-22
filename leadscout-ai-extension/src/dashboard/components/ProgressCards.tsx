@@ -7,14 +7,21 @@ interface StatCardProps {
   value: string | number
   sub?: string
   accent?: string
+  icon?: string
+  tint?: string   // subtle gradient tint, e.g. 'from-blue-500/10'
 }
 
-function StatCard({ label, value, sub, accent = 'text-white' }: StatCardProps) {
+function StatCard({ label, value, sub, accent = 'text-white', icon, tint = 'from-gray-500/5' }: StatCardProps) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex flex-col gap-1">
-      <span className="text-xs text-gray-500 font-medium uppercase tracking-wide">{label}</span>
-      <span className={`text-2xl font-bold ${accent}`}>{value}</span>
-      {sub && <span className="text-xs text-gray-600">{sub}</span>}
+    <div className={`relative overflow-hidden rounded-2xl border border-gray-800 bg-gray-900 p-4 flex flex-col gap-1
+      transition-all duration-200 hover:-translate-y-0.5 hover:border-gray-700 hover:shadow-lg hover:shadow-black/20`}>
+      <div className={`pointer-events-none absolute inset-0 bg-gradient-to-br ${tint} to-transparent`} />
+      <div className="relative flex items-center justify-between">
+        <span className="text-[11px] text-gray-500 font-medium uppercase tracking-wide">{label}</span>
+        {icon && <span className="text-sm opacity-60">{icon}</span>}
+      </div>
+      <span className={`relative text-2xl font-bold ${accent}`}>{value}</span>
+      {sub && <span className="relative text-xs text-gray-600">{sub}</span>}
     </div>
   )
 }
@@ -77,24 +84,32 @@ export default function ProgressCards() {
           value={totalCaptured}
           sub={isRunning ? 'Live' : 'This session'}
           accent="text-blue-400"
+          icon="⌕"
+          tint="from-blue-500/12"
         />
         <StatCard
           label="Duplicates Skipped"
           value={duplicatesSkipped}
           sub="This session"
-          accent="text-yellow-400"
+          accent="text-amber-400"
+          icon="⧉"
+          tint="from-amber-500/12"
         />
         <StatCard
           label="Total Sessions"
           value={totalSessions}
           sub={`${completedSessions} completed`}
-          accent="text-purple-400"
+          accent="text-violet-400"
+          icon="◱"
+          tint="from-violet-500/12"
         />
         <StatCard
           label="Session Status"
           value={sessionId ? status.replace('_', ' ') : 'Idle'}
           sub={activeSession ? `ID #${activeSession.id}` : 'No active session'}
-          accent={isRunning ? 'text-green-400' : 'text-gray-400'}
+          accent={isRunning ? 'text-emerald-400' : 'text-gray-400'}
+          icon="◉"
+          tint={isRunning ? 'from-emerald-500/12' : 'from-gray-500/6'}
         />
       </div>
     </div>

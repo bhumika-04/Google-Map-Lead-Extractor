@@ -18,6 +18,7 @@ import { normalizeName } from '@/utils/normalize'
 import { nowISO } from '@/utils/date'
 import { openDashboard } from '@/services/chromeMessaging'
 import { processNextJob } from '@/services/researchService'
+import { sweepOrphanScraperTabs } from '@/services/socialScraper'
 import { addToResearchQueue } from '@/services/futureResearchService'
 import { discoverLeads } from '@/services/directoryDiscovery'
 import { syncToSql, isApiAvailable, fetchApiConfig, restoreFromSql, saveLeadBatchToSql, saveValidationBulkToSql, createSearchRunInSql, updateSearchRunInSql, fetchSearchRuns } from '@/services/sqlSyncService'
@@ -347,33 +348,29 @@ async function syncLeadsFromMssql(): Promise<{ synced: number }> {
     return { synced: 0 }
   }
 
-  // ── Step 0: Deduplicate existing IndexedDB leads by normalizedName+city ─────
-  // Same company captured in multiple sessions (different keywords) creates duplicates.
-  // Key is name|city — city prevents collapsing same-named companies in different locations.
-  // Keep the one with the highest status; delete the rest.
+  // ── Step 0: status ranking (used by the rank-guarded status merge below) ────
   const STATUS_RANK: Record<string, number> = {
     research_completed: 4,
     research_failed: 3, research_running: 3, research_pending: 3, selected: 3,
     rejected: 2, new: 1,
   }
   const allLeads = await leadRepository.getAll()
-  const nameGroups = new Map<string, Lead[]>()
-  for (const l of allLeads) {
-    const key = `${l.normalizedName}|${(l.city ?? '').toLowerCase()}`
-    const arr = nameGroups.get(key) ?? []
-    arr.push(l)
-    nameGroups.set(key, arr)
-  }
+
+  // IMPORTANT: the reload sync is intentionally NON-DESTRUCTIVE — it only
+  // UPSERTs/inserts, it must NEVER delete local leads.
+  //
+  // This path used to run a "Step 0 dedup" that grouped ALL local leads by
+  // normalizedName+city (across every Search Session) and DELETED the extras on
+  // every dashboard open. That silently wiped legitimately-separate leads — e.g.
+  // the same company captured under two different sessions/keywords, or leads that
+  // had not yet synced to MSSQL — turning a ~1,700-lead capture into ~800 after a
+  // reload. Capture already dedupes within a session at save time (findCandidatesForDedupe
+  // + isDuplicate + mergeLeadData), and the new Search Session model deliberately keeps
+  // different runs separate, so collapsing across sessions here is both wrong and lossy.
+  // Deduplication, if ever wanted, must be an explicit user action — not a silent
+  // side effect of opening the dashboard.
   const deletedLocalIds = new Set<number>()
-  for (const group of nameGroups.values()) {
-    if (group.length <= 1) continue
-    group.sort((a, b) => (STATUS_RANK[b.status] ?? 0) - (STATUS_RANK[a.status] ?? 0))
-    for (let i = 1; i < group.length; i++) {
-      const dup = group[i]
-      if (dup.id) { await leadRepository.delete(dup.id); deletedLocalIds.add(dup.id) }
-    }
-  }
-  const dedupedCount = deletedLocalIds.size
+  const dedupedCount = 0
 
   // Build lookup maps: mssqlId → lead and (normalizedName|city) → lead
   const existingLeads = allLeads.filter(l => l.id && !deletedLocalIds.has(l.id))
@@ -391,12 +388,39 @@ async function syncLeadsFromMssql(): Promise<{ synced: number }> {
   const remoteRuns = await fetchSearchRuns()
   const localProjects = await searchProjectRepository.getAll().catch(() => [])
   const runToLocalProject = new Map<number, number>()
+  // Also index existing sessions by name+country so a remote run that isn't
+  // linked by id can be matched to an existing local session and LINKED, rather
+  // than spawning a phantom empty "0 keyword / 0 city" duplicate card. This both
+  // heals orphaned runs from the old double-create race and keeps genuine
+  // restores (after a data wipe) working.
+  const nameCountryKey = (name?: string, country?: string) =>
+    `${(name ?? '').trim().toLowerCase()}|${(country ?? '').toLowerCase()}`
+  const projectByNameCountry = new Map<string, { id: number; mssqlRunId?: number }>()
   for (const p of localProjects) {
     if (p.mssqlRunId !== undefined && p.id) runToLocalProject.set(p.mssqlRunId, p.id)
+    if (p.id) {
+      const key = nameCountryKey(p.name, p.country)
+      if (!projectByNameCountry.has(key)) projectByNameCountry.set(key, { id: p.id, mssqlRunId: p.mssqlRunId })
+    }
   }
   let projectsRestored = 0
   for (const r of remoteRuns) {
     if (runToLocalProject.has(r.id)) continue
+
+    // A local session with the same name+country already exists — link this run
+    // to it instead of creating a duplicate card.
+    const key = nameCountryKey(r.name, r.country)
+    const existing = projectByNameCountry.get(key)
+    if (existing) {
+      runToLocalProject.set(r.id, existing.id)
+      if (existing.mssqlRunId === undefined) {
+        await searchProjectRepository.update(existing.id, { mssqlRunId: r.id }).catch(() => {})
+        existing.mssqlRunId = r.id
+      }
+      continue
+    }
+
+    // Genuinely new (e.g. leads restored after a local wipe) — recreate the session.
     try {
       const pid = await searchProjectRepository.create({
         name: r.name,
@@ -412,8 +436,41 @@ async function syncLeadsFromMssql(): Promise<{ synced: number }> {
         mssqlRunId: r.id,
       })
       runToLocalProject.set(r.id, pid)
+      projectByNameCountry.set(key, { id: pid, mssqlRunId: r.id })
       projectsRestored++
     } catch { /* skip */ }
+  }
+
+  // ── Heal existing phantom duplicate sessions ────────────────────────────────
+  // The old double-create race left orphan runs that the previous rebuild turned
+  // into empty "0 keyword / 0 city / 0 leads" duplicate cards. Remove any such
+  // empty session that (a) has no leads and (b) has a REAL same-name+country
+  // sibling (one with keywords or leads). SearchConsole always sets keywords, and
+  // a genuine post-wipe restore is the only session with its name — so this only
+  // ever deletes true phantoms. delete() un-assigns leads first, so no data loss.
+  const leadCountByProject = new Map<number, number>()
+  for (const l of allLeads) {
+    if (l.projectId !== undefined) {
+      leadCountByProject.set(l.projectId, (leadCountByProject.get(l.projectId) ?? 0) + 1)
+    }
+  }
+  let phantomsRemoved = 0
+  for (const p of localProjects) {
+    if (!p.id) continue
+    const isEmpty = (p.keywords?.length ?? 0) === 0 && (p.cities?.length ?? 0) === 0
+    if (!isEmpty || (leadCountByProject.get(p.id) ?? 0) > 0) continue
+    const hasRealSibling = localProjects.some((q) =>
+      q.id && q.id !== p.id &&
+      nameCountryKey(q.name, q.country) === nameCountryKey(p.name, p.country) &&
+      ((q.keywords?.length ?? 0) > 0 || (leadCountByProject.get(q.id) ?? 0) > 0)
+    )
+    if (hasRealSibling) {
+      await searchProjectRepository.delete(p.id).catch(() => {})
+      phantomsRemoved++
+    }
+  }
+  if (phantomsRemoved > 0) {
+    await log('sync', `Removed ${phantomsRemoved} phantom duplicate session${phantomsRemoved > 1 ? 's' : ''}`)
   }
 
   // Track mssqlId → IndexedDB leadId so we can link research results below
@@ -1058,7 +1115,7 @@ async function advanceBatchCampaign(cityCaptured: number, completedMapsTabId: nu
     sessionId:  nextSessionId,
     city:       nextCity,
     keyword:    campaign.keyword,
-    country:    campaign.country ?? cachedSettings?.lastCountry ?? 'IN',
+    country:    cities[nextIdx].country ?? campaign.country ?? cachedSettings?.lastCountry ?? 'IN',
     mapsUrl,
     maxResults: BATCH_UNLIMITED,
     settings:   cachedSettings ?? DEFAULT_SETTINGS,
@@ -1120,7 +1177,7 @@ async function handleBatchCampaignStart(payload: { campaignId: number }) {
     sessionId:  firstSessionId,
     city:       firstCity,
     keyword:    campaign.keyword,
-    country:    campaignCountry,
+    country:    cities[0].country ?? campaignCountry,
     mapsUrl,
     maxResults: BATCH_UNLIMITED,
     settings:   cachedSettings,
@@ -1636,6 +1693,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   // itself still propagates — .catch() here prevents it becoming an unhandled
   // promise rejection on every alarm tick if something unexpected throws.
   if (alarm.name === RESEARCH_ALARM) {
+    // Close any scraper tabs orphaned by a killed service worker BEFORE opening
+    // new ones — stops research tabs from piling up into tab-access/forbidden
+    // errors on long multi-city/keyword runs.
+    sweepOrphanScraperTabs().catch(() => {})
     tickResearchQueue().catch((err) => console.error('[research-alarm] tick failed:', err))
     // Watchdog for the persisted Search Console queue — resumes a run that
     // stalled because the SW was killed mid-pause or a capture died silently.
@@ -1861,3 +1922,4 @@ chrome.runtime.onStartup.addListener(async () => {
 ensureResearchAlarm()
 ensureNurtureAlarm()
 resetStuckJobs()
+sweepOrphanScraperTabs().catch(() => {})   // close any tabs a previously-killed worker left open

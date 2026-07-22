@@ -6,6 +6,7 @@ import type { ResearchJob, ResearchResult } from '@/types/research'
 import type { DeepResearch } from '@/types/deepResearch'
 import type { BatchCampaign } from '@/types/batchCampaign'
 import type { ExistingClient } from '@/types/existingClient'
+import type { SelectedLead, ResearchedLead } from '@/types/derivedLeads'
 // SearchEvidence, SourcePage, CompanyResearch removed from IndexedDB (version 8).
 // Phase 3 data is stored exclusively in MSSQL via apiResearchService.
 
@@ -34,6 +35,9 @@ export class LeadScoutDB extends Dexie {
   batchCampaigns!: Table<BatchCampaign, number>
   existingClients!: Table<ExistingClient, number>
   searchProjects!: Table<SearchProject, number>
+  // Dedicated per-stage tables — materialized from `leads` (which stays the master).
+  selectedLeads!: Table<SelectedLead, number>
+  researchedLeads!: Table<ResearchedLead, number>
   // searchEvidence, sourcePages, companyResearch removed — Phase 3 data lives in MSSQL only
 
   constructor() {
@@ -157,6 +161,25 @@ export class LeadScoutDB extends Dexie {
       batchCampaigns: '++id, status, createdAt',
       existingClients:'++id, normalizedName, city, phone, normalizedPhone, uploadedAt',
       searchProjects: '++id, status, createdAt',
+    })
+
+    // Version 11: dedicated per-stage tables. `selectedLeads` and `researchedLeads`
+    // are keyed by leadId (same id as the master lead) and are MATERIALIZED from the
+    // `leads` table via syncDerivedLeads(). `leads` remains the single source of
+    // truth — these are rebuildable projections, so no lead data can be lost here.
+    this.version(11).stores({
+      searchSessions: '++id, status, city, keyword, createdAt',
+      leads:          '++id, sessionId, projectId, status, normalizedName, city, keyword, phone, googleMapsUrl, validationStatus, icpScore, capturedAt',
+      researchJobs:   '++id, leadId, sessionId, status, jobType, createdAt',
+      researchResults:'++id, leadId, jobId, createdAt',
+      deepResearch:   '++id, researchResultId, leadId, researchedAt',
+      activityLogs:   '++id, sessionId, type, createdAt',
+      settings:       'key',
+      batchCampaigns: '++id, status, createdAt',
+      existingClients:'++id, normalizedName, city, phone, normalizedPhone, uploadedAt',
+      searchProjects: '++id, status, createdAt',
+      selectedLeads:   'leadId, projectId, icpScore, selectedAt',
+      researchedLeads: 'leadId, projectId, researchedAt',
     })
   }
 }

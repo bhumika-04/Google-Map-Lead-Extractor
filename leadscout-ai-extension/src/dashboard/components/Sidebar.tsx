@@ -3,18 +3,15 @@ import React from 'react'
 export type NavSection =
   | 'overview'
   | 'search'
+  | 'session_pipeline'
   | 'batch_campaigns'
   | 'leads'
   | 'selected'
   | 'research'
   | 'research_results'
-  | 'company_intelligence'
-  | 'linkedin_intelligence'
   | 'markets'
   | 'followups'
   | 'nurture'
-  | 'analytics'
-  | 'import'
   | 'existing_clients'
   | 'backup'
   | 'logs'
@@ -37,19 +34,16 @@ interface SidebarProps {
 const NAV_ITEMS: NavItem[] = [
   { id: 'overview',         label: 'Overview',          icon: '◈' },
   { id: 'search',           label: 'Search Console',    icon: '⌕' },
+  { id: 'session_pipeline', label: 'Session Pipeline',  icon: '◱' },
   { id: 'batch_campaigns',  label: 'Batch Campaigns',   icon: '⊞' },
   { id: 'leads',            label: 'Lead Database',     icon: '☰' },
   { id: 'selected',         label: 'Selected Leads',    icon: '✓' },
   { id: 'research',         label: 'Research Queue',    icon: '⚗' },
   { id: 'research_results', label: 'Research Results',  icon: '◉' },
-  { id: 'company_intelligence', label: 'Company Intelligence', icon: '⊚' },
-  { id: 'linkedin_intelligence', label: 'LinkedIn Intelligence', icon: 'in' },
-  { id: 'markets',          label: 'Markets',           icon: '🌍' },
+  { id: 'markets',          label: 'Markets',           icon: '◍' },
   { id: 'followups',        label: 'Follow-Ups',        icon: '⏰', dividerBefore: true },
   { id: 'nurture',          label: 'Nurture',           icon: '◎' },
-  { id: 'analytics',        label: 'Analytics',         icon: '▦', dividerBefore: true },
-  { id: 'import',           label: 'Import CSV',        icon: '↑' },
-  { id: 'existing_clients', label: 'Existing Clients',  icon: '⊘' },
+  { id: 'existing_clients', label: 'Existing Clients',  icon: '⊘', dividerBefore: true },
   { id: 'backup',           label: 'Backup & Restore',  icon: '⇅' },
   { id: 'logs',             label: 'Activity Logs',     icon: '≡', dividerBefore: true },
 ]

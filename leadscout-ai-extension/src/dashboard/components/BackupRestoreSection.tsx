@@ -186,7 +186,7 @@ export default function BackupRestoreSection() {
   }
 
   return (
-    <div className="max-w-2xl space-y-5">
+    <div className="max-w-4xl mx-auto space-y-5">
 
       {/* API status banner */}
       {apiUp === false && (
@@ -214,8 +214,10 @@ export default function BackupRestoreSection() {
         </div>
       </div>
 
+      {/* Sync + Clear — side by side to fill the width */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
       {/* Sync from Database — primary action */}
-      <div className="bg-gray-900 border border-blue-800/40 rounded-xl p-5 space-y-3">
+      <div className="bg-gray-900 border border-blue-800/40 rounded-xl p-5 space-y-3 flex flex-col">
         <div>
           <h3 className="text-sm font-semibold text-white">Sync from Database</h3>
           <p className="text-xs text-gray-500 mt-1">
@@ -227,7 +229,7 @@ export default function BackupRestoreSection() {
         <button
           onClick={handleSyncFromDb}
           disabled={syncing || apiUp === false}
-          className="w-full py-2.5 bg-blue-700 hover:bg-blue-600 disabled:opacity-50
+          className="w-full mt-auto py-2.5 bg-blue-700 hover:bg-blue-600 disabled:opacity-50
             text-white text-sm font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
         >
           {syncing ? 'Syncing…' : '⟳ Sync from MSSQL Database'}
@@ -235,7 +237,7 @@ export default function BackupRestoreSection() {
       </div>
 
       {/* Clear local data */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-3">
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-3 flex flex-col">
         <div>
           <h3 className="text-sm font-semibold text-white">Clear Local Data</h3>
           <p className="text-xs text-gray-500 mt-1">
@@ -246,11 +248,12 @@ export default function BackupRestoreSection() {
         <button
           onClick={handleClearAll}
           disabled={clearing}
-          className="w-full py-2.5 bg-red-900/50 hover:bg-red-800 disabled:opacity-50
+          className="w-full mt-auto py-2.5 bg-red-900/50 hover:bg-red-800 disabled:opacity-50
             text-red-300 hover:text-white text-sm font-semibold rounded-lg transition-colors border border-red-800/50"
         >
           {clearing ? 'Clearing…' : '✕ Clear All Local Data'}
         </button>
+      </div>
       </div>
 
       {/* Export / Import */}

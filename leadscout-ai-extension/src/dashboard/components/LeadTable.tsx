@@ -349,7 +349,11 @@ export default function LeadTable({ filterStatus, title }: LeadTableProps) {
       return
     }
     const { apiKey } = await resolveAiCredentials(settings)
-    const allLeads = await leadRepository.getAll()
+    // Respect the active Search Session scope — enrich only this session's leads,
+    // not the entire database. (Same scope the table itself shows.)
+    const allLeads = projectScope
+      ? await leadRepository.getByFilter({ projectId: projectScope.id })
+      : await leadRepository.getAll()
     if (allLeads.length === 0) { toast.info('No leads to enrich'); return }
     setReEnriching(true)
     setEnrichProgress({ done: 0, total: allLeads.length })

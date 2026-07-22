@@ -6,8 +6,9 @@ import { useCaptureStore } from '@/state/useCaptureStore'
 import { toast } from '@/state/useToastStore'
 import { translateKeyword } from '@/services/queryLocalizer'
 import { searchProjectRepository } from '@/db/searchProjectRepository'
-import { createSearchRunInSql } from '@/services/sqlSyncService'
+import { resolveAiCredentials } from '@/services/sqlSyncService'
 import { getCountryIntelligence } from '@/config/countryIntelligence'
+import { fetchTopCities, fetchKeywordSynonyms } from '@/services/cityService'
 import SearchPresets from './SearchPresets'
 
 // Local-language Maps keyword (e.g. "printing press" → "مطبعة" for Oman) —
@@ -94,7 +95,28 @@ export const COUNTRIES: { code: string; name: string }[] = [
 
 // ─── City lists per country ───────────────────────────────────────────────────
 export const COUNTRY_CITIES: Record<string, string[]> = {
-  IN: ['Mumbai', 'Delhi', 'Bangalore', 'Chennai', 'Kolkata', 'Hyderabad', 'Pune', 'Ahmedabad', 'Surat', 'Jaipur', 'Lucknow', 'Kanpur', 'Nagpur', 'Indore', 'Bhopal', 'Patna', 'Vadodara', 'Ludhiana', 'Coimbatore', 'Kochi', 'Agra', 'Nashik', 'Faridabad', 'Meerut', 'Rajkot', 'Varanasi', 'Aurangabad', 'Amritsar', 'Vijayawada', 'Jodhpur', 'Ranchi', 'Guwahati', 'Chandigarh', 'Mysuru', 'Bhubaneswar', 'Noida', 'Gurgaon', 'Thane', 'Visakhapatnam', 'Srinagar', 'Hubli', 'Tiruchirappalli', 'Jabalpur', 'Madurai', 'Thiruvananthapuram', 'Raipur', 'Kota', 'Gwalior', 'Navi Mumbai', 'Dhanbad'],
+  IN: [
+    'Mumbai', 'Delhi', 'Bangalore', 'Chennai', 'Kolkata', 'Hyderabad', 'Pune', 'Ahmedabad', 'Surat', 'Jaipur',
+    'Lucknow', 'Kanpur', 'Nagpur', 'Indore', 'Bhopal', 'Patna', 'Vadodara', 'Ludhiana', 'Coimbatore', 'Kochi',
+    'Agra', 'Nashik', 'Faridabad', 'Meerut', 'Rajkot', 'Varanasi', 'Aurangabad', 'Amritsar', 'Vijayawada', 'Jodhpur',
+    'Ranchi', 'Guwahati', 'Chandigarh', 'Mysuru', 'Bhubaneswar', 'Noida', 'Gurgaon', 'Thane', 'Visakhapatnam', 'Srinagar',
+    'Hubli', 'Tiruchirappalli', 'Jabalpur', 'Madurai', 'Thiruvananthapuram', 'Raipur', 'Kota', 'Gwalior', 'Navi Mumbai', 'Dhanbad',
+    'Prayagraj', 'Howrah', 'Jalandhar', 'Bareilly', 'Moradabad', 'Aligarh', 'Gorakhpur', 'Saharanpur', 'Guntur', 'Bikaner',
+    'Amravati', 'Bhilai', 'Warangal', 'Cuttack', 'Firozabad', 'Nellore', 'Bhavnagar', 'Durgapur', 'Asansol', 'Nanded',
+    'Kolhapur', 'Ajmer', 'Akola', 'Jamnagar', 'Ujjain', 'Siliguri', 'Jhansi', 'Mangalore', 'Belgaum', 'Tirunelveli',
+    'Gaya', 'Jalgaon', 'Udaipur', 'Tirupur', 'Davanagere', 'Kozhikode', 'Kurnool', 'Bokaro', 'Bellary', 'Patiala',
+    'Agartala', 'Bhagalpur', 'Muzaffarnagar', 'Latur', 'Dhule', 'Rohtak', 'Korba', 'Bhilwara', 'Berhampur', 'Muzaffarpur',
+    'Ahmednagar', 'Mathura', 'Kollam', 'Kadapa', 'Sambalpur', 'Bilaspur', 'Shahjahanpur', 'Satara', 'Vijayapura', 'Rampur',
+    'Shivamogga', 'Chandrapur', 'Junagadh', 'Thrissur', 'Alwar', 'Bardhaman', 'Nizamabad', 'Parbhani', 'Tumakuru', 'Khammam',
+    'Panipat', 'Darbhanga', 'Aizawl', 'Dewas', 'Ichalkaranji', 'Karnal', 'Bathinda', 'Jalna', 'Eluru', 'Barasat',
+    'Purnia', 'Satna', 'Sonipat', 'Farrukhabad', 'Sagar', 'Rourkela', 'Durg', 'Imphal', 'Ratlam', 'Hapur',
+    'Anantapur', 'Karimnagar', 'Etawah', 'Ambernath', 'Bharatpur', 'Begusarai', 'Gandhidham', 'Puducherry', 'Sikar', 'Thoothukudi',
+    'Rewa', 'Mirzapur', 'Raichur', 'Pali', 'Ramagundam', 'Haridwar', 'Vellore', 'Salem', 'Erode', 'Dehradun',
+    'Gandhinagar', 'Anand', 'Nadiad', 'Morbi', 'Mehsana', 'Surendranagar', 'Vapi', 'Navsari', 'Bharuch', 'Porbandar',
+    'Karur', 'Thanjavur', 'Dindigul', 'Hosur', 'Cuddalore', 'Kumbakonam', 'Nagercoil', 'Kanchipuram', 'Karaikudi', 'Neyveli',
+    'Kakinada', 'Rajahmundry', 'Tirupati', 'Ongole', 'Chittoor', 'Vizianagaram', 'Tenali', 'Proddatur', 'Machilipatnam', 'Adoni',
+    'Palakkad', 'Kannur', 'Kottayam', 'Alappuzha', 'Malappuram', 'Bidar', 'Hospet', 'Hassan', 'Gadag', 'Chikmagalur',
+  ],
   AE: ['Dubai', 'Abu Dhabi', 'Sharjah', 'Ajman', 'Ras Al Khaimah', 'Fujairah', 'Umm Al Quwain', 'Al Ain'],
   SA: ['Riyadh', 'Jeddah', 'Mecca', 'Medina', 'Dammam', 'Al Khobar', 'Tabuk', 'Abha', 'Buraidah', 'Khamis Mushait', 'Al Ahsa', 'Yanbu', 'Jizan', 'Najran', 'Hail'],
   PK: ['Karachi', 'Lahore', 'Islamabad', 'Faisalabad', 'Rawalpindi', 'Multan', 'Gujranwala', 'Hyderabad', 'Peshawar', 'Quetta', 'Sialkot', 'Bahawalpur', 'Sargodha', 'Gujrat', 'Sheikhupura', 'Sukkur', 'Larkana', 'Jhang', 'Rahim Yar Khan', 'Mardan'],
@@ -209,7 +231,7 @@ interface CityMultiSelectProps {
   disabled?: boolean
 }
 
-function CityMultiSelect({ selected, onChange, country, disabled }: CityMultiSelectProps) {
+export function CityMultiSelect({ selected, onChange, country, disabled }: CityMultiSelectProps) {
   const [search, setSearch] = useState('')
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -273,7 +295,8 @@ function CityMultiSelect({ selected, onChange, country, disabled }: CityMultiSel
         {selected.map((city) => (
           <span
             key={city}
-            className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 bg-blue-700/60 border border-blue-600/50 text-blue-100 text-xs rounded-md shrink-0"
+            className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 text-blue-50 text-xs rounded-md shrink-0 animate-pop-in
+              bg-gradient-to-r from-blue-600/50 to-indigo-600/50 border border-blue-500/40"
           >
             {city}
             <button
@@ -392,6 +415,17 @@ export default function SearchConsole() {
   const { settings, update: updateSettings } = useSettingsStore()
   const { status, totalCaptured, setStatus, reset, appendLog } = useCaptureStore()
 
+  // Whether any AI key is usable — local settings OR the backend appsettings.json.
+  // Used to gate the auto-fetch of city/synonym suggestions.
+  const [aiKeyAvailable, setAiKeyAvailable] = useState(
+    !!(settings.openAiApiKey || settings.geminiApiKey || settings.anthropicApiKey)
+  )
+  useEffect(() => {
+    if (settings.openAiApiKey || settings.geminiApiKey || settings.anthropicApiKey) { setAiKeyAvailable(true); return }
+    resolveAiCredentials(settings).then((c) => setAiKeyAvailable(!!c.apiKey)).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.openAiApiKey, settings.geminiApiKey, settings.anthropicApiKey])
+
   // City as array (multi-select); derived string used for settings save + display
   const [selectedCities, setSelectedCities] = useState<string[]>([])
   const city = selectedCities.join(', ')
@@ -400,6 +434,7 @@ export default function SearchConsole() {
   }, [])
 
   const [keyword, setKeyword] = useState(settings.lastKeyword ?? '')
+  const [sessionName, setSessionName] = useState('')
   const [country, setCountry] = useState(settings.lastCountry ?? 'IN')
   const [countrySearch, setCountrySearch] = useState('')
   const [countryOpen, setCountryOpen]     = useState(false)
@@ -448,12 +483,34 @@ export default function SearchConsole() {
     return () => document.removeEventListener('mousedown', handle)
   }, [countryOpen])
 
-  // Update synonym suggestions when keyword changes
+  // Instant local synonym suggestions when keyword changes (offline placeholder
+  // shown while the AI call below is in flight). AI-fetched related terms are
+  // merged on top and kept as the user types.
   useEffect(() => {
-    const newSuggestions = getSuggestions(keyword)
-    setSuggestions(newSuggestions)
-    setSelectedTerms((prev) => prev.filter((t) => newSuggestions.includes(t)))
+    const local = getSuggestions(keyword)
+    // Preserve any AI-fetched / already-selected terms so they aren't wiped on each keystroke.
+    setSuggestions((prev) => [...new Set([...local, ...prev.filter((t) => selectedTerms.includes(t))])])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyword])
+
+  // Auto-fetch AI synonyms once the user pauses typing — this is what makes
+  // suggestions genuinely dynamic for ANY keyword (not just the hardcoded map).
+  // Debounced + cached per keyword, so each distinct term hits the API only once.
+  const autoSynTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastAutoKeyword = useRef<string>('')
+  useEffect(() => {
+    const kw = keyword.trim().toLowerCase()
+    if (autoSynTimer.current) clearTimeout(autoSynTimer.current)
+    if (kw.length < 4 || kw === lastAutoKeyword.current) return
+    // No AI key (local or backend) → silently rely on the local hints.
+    if (!aiKeyAvailable) return
+    autoSynTimer.current = setTimeout(() => {
+      lastAutoKeyword.current = kw
+      runSynonymFetch(true)
+    }, 1000)
+    return () => { if (autoSynTimer.current) clearTimeout(autoSynTimer.current) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyword, country, aiKeyAvailable])
 
   // Live queue progress from the service worker, which owns the multi-term run
   // (persisted queue — advancing, pacing, and retries all happen SW-side).
@@ -499,6 +556,46 @@ export default function SearchConsole() {
     )
   }
 
+  // Quick-add top cities — fetched live from the AI provider for ANY country,
+  // so Uganda / Dubai / anywhere works the same as India (no hardcoded lists).
+  const [fetchingTier, setFetchingTier] = useState<number | null>(null)
+  async function addTopCities(n: number) {
+    if (fetchingTier !== null) return
+    const countryName = COUNTRIES.find((c) => c.code === country)?.name ?? country
+    setFetchingTier(n)
+    try {
+      const cities = await fetchTopCities(country, countryName, n, settings)
+      if (!cities.length) { toast.error(`No cities returned for ${countryName}`); return }
+      setSelectedCities((prev) => [...new Set([...prev, ...cities])])
+      toast.success(`Added ${cities.length} top ${countryName} cities`)
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Could not fetch cities')
+    } finally {
+      setFetchingTier(null)
+    }
+  }
+
+  // Ask the AI for 10-15 related keywords / synonyms for whatever the user typed
+  // — works for any keyword, not just the hardcoded local map.
+  const [fetchingSynonyms, setFetchingSynonyms] = useState(false)
+  // silent=true is the automatic (debounced) path — no toasts, fails quietly.
+  async function runSynonymFetch(silent: boolean) {
+    if (fetchingSynonyms || !keyword.trim()) return
+    const countryName = COUNTRIES.find((c) => c.code === country)?.name ?? country
+    setFetchingSynonyms(true)
+    try {
+      const terms = await fetchKeywordSynonyms(keyword.trim(), countryName, settings)
+      if (!terms.length) { if (!silent) toast.error('No related keywords returned'); return }
+      setSuggestions((prev) => [...new Set([...prev, ...terms])])
+      if (!silent) toast.success(`Added ${terms.length} related keywords`)
+    } catch (err: any) {
+      if (!silent) toast.error(err?.message ?? 'Could not fetch keywords')
+    } finally {
+      setFetchingSynonyms(false)
+    }
+  }
+  const suggestKeywords = () => runSynonymFetch(false)
+
   async function handleStart() {
     setError('')
     if (selectedCities.length === 0) { setError('Please select or type at least one city.'); return }
@@ -524,7 +621,9 @@ export default function SearchConsole() {
     const runIcp = runProfile.trim() || settings.businessProfile
     const countryName = COUNTRIES.find((c) => c.code === country)?.name ?? country
     const dateLabel = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-    const projectName = `${keywords[0]}${keywords.length > 1 ? ` +${keywords.length - 1}` : ''} — ${countryName} — ${dateLabel}`
+    // User-given session name wins; otherwise fall back to an auto-generated one.
+    const autoName = `${keywords[0]}${keywords.length > 1 ? ` +${keywords.length - 1}` : ''} — ${countryName} — ${dateLabel}`
+    const projectName = sessionName.trim() || autoName
     const projectId = await searchProjectRepository.create({
       name: projectName,
       country,
@@ -538,13 +637,11 @@ export default function SearchConsole() {
       source: 'search_console',
     })
 
-    // Register the run in MSSQL (best-effort) so every lead batch carries its
-    // run tag — the service worker retries this later if the API is down now.
-    createSearchRunInSql({ name: projectName, country, businessProfile: runIcp, status: 'running' })
-      .then((runId) => {
-        if (runId !== null) searchProjectRepository.update(projectId, { mssqlRunId: runId }).catch(() => {})
-      })
-      .catch(() => {})
+    // NOTE: the MSSQL search_run is created lazily by the service worker on the
+    // first lead batch (it owns run creation + linkage — see serviceWorker.ts).
+    // Creating it here as well caused a race: two runs per session, one orphaned,
+    // which surfaced as a phantom "Running · 0 keyword · 0 city" duplicate session
+    // card after a DB sync. So we intentionally do NOT create the run here.
 
     // Hand the whole run to the service worker in one message. The SW persists
     // the queue and drives every term itself (sessions, pacing, tab handling),
@@ -605,10 +702,20 @@ export default function SearchConsole() {
   const hasMultipleTerms = totalSearches > 1
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+    <div className="relative overflow-hidden bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-4 shadow-lg shadow-black/20 animate-fade-in-up">
+      {/* Soft gradient accent along the top edge */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 via-indigo-500 to-violet-500 opacity-80" />
+
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h2 className="font-semibold text-white text-sm">Search Console</h2>
+        <div className="flex items-center gap-2.5">
+          <span className="flex items-center justify-center w-9 h-9 rounded-xl text-base
+            bg-gradient-to-br from-blue-500/20 to-violet-500/20 border border-blue-500/30 text-blue-200">⌕</span>
+          <div>
+            <h2 className="font-semibold text-white text-sm leading-none">Search Console</h2>
+            <p className="text-[11px] text-gray-500 mt-1">Capture → validate → research, in one run</p>
+          </div>
+        </div>
         {isRunning && (
           <span className="flex items-center gap-1.5 text-xs text-green-400 font-medium">
             <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
@@ -619,6 +726,24 @@ export default function SearchConsole() {
 
       {/* Input grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+        {/* Session name — this run's workspace. Leads, validation, research and
+            company intelligence all stay grouped under this one session. */}
+        <div className="sm:col-span-2">
+          <label className="block text-xs text-gray-400 mb-1 font-medium">
+            Session name
+            <span className="ml-1.5 text-gray-600 font-normal">— groups this run's leads, validation &amp; research in one workspace</span>
+          </label>
+          <input
+            type="text"
+            value={sessionName}
+            onChange={(e) => setSessionName(e.target.value)}
+            disabled={isRunning}
+            placeholder="e.g. Printing — Gujarat   ·   Pesticides — Punjab   (blank = auto-named)"
+            className="w-full bg-gray-800 border border-gray-700 text-white text-sm px-3 py-2 rounded-lg placeholder-gray-600
+              focus:outline-none focus:border-blue-500 disabled:opacity-50 transition-colors"
+          />
+        </div>
 
         {/* Market / Country selector */}
         <div className="sm:col-span-2" ref={countryRef}>
@@ -685,11 +810,9 @@ export default function SearchConsole() {
           <div className="flex items-center justify-between mb-1">
             <label className="text-xs text-gray-400 font-medium">
               City
-              {(COUNTRY_CITIES[country]?.length ?? 0) > 0 && (
-                <span className="ml-1.5 text-gray-600 font-normal">
-                  — {COUNTRY_CITIES[country].length} cities available for {COUNTRIES.find(c => c.code === country)?.name ?? country}
-                </span>
-              )}
+              <span className="ml-1.5 text-gray-600 font-normal">
+                — {COUNTRIES.find(c => c.code === country)?.name ?? country}
+              </span>
             </label>
             {selectedCities.length > 1 && (
               <span className="text-xs text-blue-400">{selectedCities.length} cities selected</span>
@@ -704,6 +827,43 @@ export default function SearchConsole() {
           <p className="mt-1 text-xs text-gray-700">
             Select from list or type any city name and press Enter. Multiple cities run sequentially.
           </p>
+
+          {/* City quick-add — fetched live from AI for whatever country is selected */}
+          {!isRunning && (
+            <div className="mt-2.5 flex items-center gap-1.5 flex-wrap">
+              <span className="text-[11px] text-gray-500">AI quick-add top cities:</span>
+              {[50, 100, 200, 500].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  disabled={fetchingTier !== null}
+                  onClick={() => addTopCities(n)}
+                  className="text-xs px-2.5 py-1 rounded-full text-gray-300 border border-gray-700 bg-gray-800/60
+                    hover:border-indigo-500/50 hover:text-indigo-200 transition-all active:scale-95
+                    disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                >
+                  {fetchingTier === n && (
+                    <span className="inline-block w-3 h-3 border-2 border-indigo-400/40 border-t-indigo-400 rounded-full animate-spin" />
+                  )}
+                  Top {n}
+                </button>
+              ))}
+              {fetchingTier !== null && (
+                <span className="text-[11px] text-gray-500 animate-pulse">
+                  Asking AI for top {fetchingTier} cities in {COUNTRIES.find((c) => c.code === country)?.name ?? country}…
+                </span>
+              )}
+              {selectedCities.length > 0 && fetchingTier === null && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedCities([])}
+                  className="text-xs px-2.5 py-1 rounded-full text-gray-500 hover:text-gray-300 transition-colors"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="sm:col-span-2">
@@ -729,7 +889,7 @@ export default function SearchConsole() {
             onClick={() => setProfileOpen((v) => !v)}
             className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-gray-900/60 transition-colors"
           >
-            <span className="text-xs font-semibold text-purple-300 shrink-0">🎯 ICP for this session</span>
+            <span className="text-xs font-semibold text-purple-300 shrink-0">ICP for this session</span>
             {!profileOpen && (
               <span className="text-[10px] text-gray-600 flex-1 truncate">
                 {runProfile.trim() ? runProfile.trim().replace(/\s+/g, ' ').slice(0, 90) : 'no profile set — leads will skip validation'}
@@ -757,10 +917,25 @@ export default function SearchConsole() {
       )}
 
       {/* Related search terms */}
-      {!isRunning && suggestions.length > 0 && (
+      {!isRunning && (suggestions.length > 0 || keyword.trim()) && (
         <div className="space-y-2">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-gray-500 font-medium">Also search for</span>
+            {keyword.trim() && (
+              <button
+                onClick={suggestKeywords}
+                disabled={fetchingSynonyms}
+                className="text-xs px-2.5 py-1 rounded-full font-medium text-indigo-100 border border-indigo-500/40
+                  bg-gradient-to-r from-blue-600/25 to-violet-600/25 hover:from-blue-600/40 hover:to-violet-600/40
+                  hover:border-indigo-400/60 transition-all active:scale-95 disabled:opacity-50
+                  disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                {fetchingSynonyms && (
+                  <span className="inline-block w-3 h-3 border-2 border-indigo-300/40 border-t-indigo-200 rounded-full animate-spin" />
+                )}
+                {fetchingSynonyms ? 'Asking AI…' : 'AI suggest related'}
+              </button>
+            )}
             {selectedTerms.length > 0 && (
               <span className="text-xs text-blue-400">
                 +{selectedTerms.length} term{selectedTerms.length > 1 ? 's' : ''} selected
@@ -775,6 +950,13 @@ export default function SearchConsole() {
               </button>
             )}
           </div>
+          {suggestions.length === 0 && (
+            <p className="text-xs text-gray-600">
+              {fetchingSynonyms
+                ? <>Fetching related categories for “{keyword.trim()}”…</>
+                : <>Related categories for “{keyword.trim()}” load automatically — or click <span className="text-indigo-300">AI suggest related</span>.</>}
+            </p>
+          )}
           <div className="flex flex-wrap gap-1.5">
             {suggestions.map((term) => {
               const active = selectedTerms.includes(term)
@@ -893,10 +1075,14 @@ export default function SearchConsole() {
         {!isRunning ? (
           <button
             onClick={handleStart}
-            className="px-5 py-2 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-sm font-semibold
-              rounded-lg transition-colors shadow-sm shadow-blue-900/40"
+            className="group px-5 py-2.5 text-white text-sm font-semibold rounded-xl transition-all duration-200
+              bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600
+              hover:from-blue-500 hover:via-indigo-500 hover:to-violet-500
+              hover:shadow-lg hover:shadow-indigo-900/50 hover:-translate-y-0.5 active:translate-y-0
+              focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
           >
-            {hasMultipleTerms ? `▶ Start Full Pipeline (${totalSearches} searches)` : '▶ Start Full Pipeline'}
+            <span className="inline-block transition-transform group-hover:translate-x-0.5">▶</span>{' '}
+            {hasMultipleTerms ? `Start Full Pipeline (${totalSearches} searches)` : 'Start Full Pipeline'}
           </button>
         ) : (
           <button

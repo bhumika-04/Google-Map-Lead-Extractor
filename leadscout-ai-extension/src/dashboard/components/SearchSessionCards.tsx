@@ -1,9 +1,8 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import type { NavSection } from './Sidebar'
 import type { SearchProject } from '@/types/searchProject'
 import { searchProjectRepository } from '@/db/searchProjectRepository'
 import { db } from '@/db/db'
-import { useLeadStore } from '@/state/useLeadStore'
 import { toast } from '@/state/useToastStore'
 import { updateSearchRunInSql } from '@/services/sqlSyncService'
 import { flag } from './SearchConsole'
@@ -23,24 +22,23 @@ interface StageCounts {
 
 const EMPTY_COUNTS: StageCounts = { captured: 0, validated: 0, qualified: 0, researched: 0 }
 
-const STATUS_STYLE: Record<string, { dot: string; badge: string; label: string }> = {
-  running:   { dot: 'bg-green-400 animate-pulse', badge: 'bg-green-950/70 border-green-800 text-green-300',  label: 'Running' },
-  completed: { dot: 'bg-blue-400',                badge: 'bg-blue-950/70 border-blue-800 text-blue-300',     label: 'Completed' },
-  stopped:   { dot: 'bg-red-400',                 badge: 'bg-red-950/70 border-red-800 text-red-300',        label: 'Stopped' },
+const STATUS_STYLE: Record<string, { dot: string; badge: string; label: string; accent: string }> = {
+  running:   { dot: 'bg-green-400 animate-pulse', badge: 'bg-green-950/70 border-green-800 text-green-300',  label: 'Running',   accent: 'from-emerald-400 to-green-500' },
+  completed: { dot: 'bg-blue-400',                badge: 'bg-blue-950/70 border-blue-800 text-blue-300',     label: 'Completed', accent: 'from-blue-400 to-indigo-500' },
+  stopped:   { dot: 'bg-red-400',                 badge: 'bg-red-950/70 border-red-800 text-red-300',        label: 'Stopped',   accent: 'from-rose-400 to-red-500' },
 }
 
-export default function SearchSessionCards({ onNavigate }: { onNavigate: (s: NavSection) => void }) {
-  const { setProjectScope } = useLeadStore()
+export default function SearchSessionCards({ onOpenWorkspace }: { onNavigate: (s: NavSection) => void; onOpenWorkspace: (projectId: number) => void }) {
   const [projects, setProjects] = useState<SearchProject[]>([])
   const [counts, setCounts] = useState<Map<number, StageCounts>>(new Map())
   const [renamingId, setRenamingId] = useState<number | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [profileId, setProfileId] = useState<number | null>(null)
   const [profileValue, setProfileValue] = useState('')
+  const cleanedRef = useRef(false)
 
   async function load() {
     const all = await searchProjectRepository.getAll().catch(() => [] as SearchProject[])
-    setProjects(all)
 
     // One pass over all leads → per-session stage counts
     const leads = await db.leads.toArray().catch(() => [])
@@ -54,6 +52,30 @@ export default function SearchSessionCards({ onNavigate }: { onNavigate: (s: Nav
       if (l.status === 'research_completed') c.researched++
       map.set(l.projectId, c)
     }
+
+    // One-time cleanup of phantom duplicate sessions (empty keywords+cities, no
+    // leads, and a REAL same-name sibling) — removes the "Running · 0 keyword ·
+    // 0 city" ghosts left by the old double-create bug, without a manual DB sync.
+    let visible = all
+    if (!cleanedRef.current) {
+      cleanedRef.current = true
+      const keyOf = (p: SearchProject) => `${(p.name ?? '').trim().toLowerCase()}|${(p.country ?? '').toLowerCase()}`
+      const phantoms = all.filter((p) =>
+        p.id !== undefined &&
+        (p.keywords?.length ?? 0) === 0 && (p.cities?.length ?? 0) === 0 &&
+        (map.get(p.id)?.captured ?? 0) === 0 &&
+        all.some((q) => q.id !== undefined && q.id !== p.id && keyOf(q) === keyOf(p) &&
+          ((q.keywords?.length ?? 0) > 0 || (map.get(q.id)?.captured ?? 0) > 0))
+      )
+      if (phantoms.length > 0) {
+        await Promise.all(phantoms.map((p) => searchProjectRepository.delete(p.id!).catch(() => {})))
+        const gone = new Set(phantoms.map((p) => p.id))
+        visible = all.filter((p) => !gone.has(p.id))
+        toast.info(`Removed ${phantoms.length} empty duplicate session${phantoms.length > 1 ? 's' : ''}`)
+      }
+    }
+
+    setProjects(visible)
     setCounts(map)
   }
 
@@ -62,11 +84,6 @@ export default function SearchSessionCards({ onNavigate }: { onNavigate: (s: Nav
     const interval = setInterval(load, 4000)
     return () => clearInterval(interval)
   }, [])
-
-  function openScoped(project: SearchProject, section: NavSection) {
-    setProjectScope({ id: project.id!, name: project.name })
-    onNavigate(section)
-  }
 
   async function saveRename(project: SearchProject) {
     const name = renameValue.trim()
@@ -132,11 +149,20 @@ export default function SearchSessionCards({ onNavigate }: { onNavigate: (s: Nav
           const isRenaming = renamingId === p.id
           const isEditingProfile = profileId === p.id
 
+          const qualifiedRate = c.captured > 0 ? Math.round((c.qualified / c.captured) * 100) : 0
+
           return (
-            <div key={p.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3 hover:border-gray-700 transition-colors">
-              {/* Header: name + status */}
-              <div className="flex items-start gap-2">
-                <span className={`w-2 h-2 mt-1.5 rounded-full shrink-0 ${style.dot}`} />
+            <div key={p.id} className="group/card relative overflow-hidden bg-gray-900 border border-gray-800 rounded-2xl
+              transition-all duration-200 hover:border-indigo-600/40 hover:shadow-xl hover:shadow-black/20 hover:-translate-y-0.5">
+              {/* Status accent strip */}
+              <div className={`h-1 w-full bg-gradient-to-r ${style.accent}`} />
+
+              <div className="p-4 space-y-3">
+              {/* Header: flag badge + name + status */}
+              <div className="flex items-start gap-2.5">
+                <span className="inline-flex items-center justify-center w-9 h-9 rounded-xl bg-gray-800 text-lg shrink-0">
+                  {flag(p.country)}
+                </span>
                 <div className="flex-1 min-w-0">
                   {isRenaming ? (
                     <input
@@ -149,21 +175,23 @@ export default function SearchSessionCards({ onNavigate }: { onNavigate: (s: Nav
                     />
                   ) : (
                     <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="text-sm font-semibold text-white truncate">{flag(p.country)} {p.name}</span>
+                      <span className="text-sm font-semibold text-white truncate">{p.name}</span>
                       <button
                         onClick={() => { setRenamingId(p.id!); setRenameValue(p.name) }}
-                        className="text-gray-600 hover:text-gray-300 text-xs shrink-0"
+                        className="text-gray-600 hover:text-gray-300 text-xs shrink-0 opacity-0 group-hover/card:opacity-100 transition-opacity"
                         title="Rename session"
                       >✎</button>
                     </div>
                   )}
-                  <div className="text-[11px] text-gray-500 mt-0.5">
-                    {p.keywords.length} keyword{p.keywords.length > 1 ? 's' : ''} · {p.cities.length} cit{p.cities.length > 1 ? 'ies' : 'y'} ·{' '}
+                  <div className="text-[11px] text-gray-500 mt-0.5 truncate">
+                    {p.keywords.length} keyword{p.keywords.length !== 1 ? 's' : ''} · {p.cities.length} cit{p.cities.length !== 1 ? 'ies' : 'y'} ·{' '}
                     {p.source === 'batch_campaign' ? 'Batch Campaign' : 'Search Console'} ·{' '}
                     {new Date(p.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
                   </div>
                 </div>
-                <span className={`text-[10px] px-2 py-0.5 rounded-full border shrink-0 ${style.badge}`}>{style.label}</span>
+                <span className={`inline-flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full border shrink-0 ${style.badge}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} /> {style.label}
+                </span>
               </div>
 
               {/* Capture progress while running */}
@@ -174,32 +202,39 @@ export default function SearchSessionCards({ onNavigate }: { onNavigate: (s: Nav
                     <span>{termPct}%</span>
                   </div>
                   <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-green-500 rounded-full transition-all duration-700" style={{ width: `${termPct}%` }} />
+                    <div className="h-full bg-gradient-to-r from-emerald-400 to-green-500 rounded-full transition-all duration-700" style={{ width: `${termPct}%` }} />
                   </div>
                 </div>
               )}
 
               {/* Pipeline stages — click a stage to open it scoped to this session */}
               <div className="grid grid-cols-4 gap-1.5">
-                <StageChip icon="⌕" label="Captured"   value={c.captured}   onClick={() => openScoped(p, 'leads')} />
-                <StageChip icon="✓" label="Validated"  value={c.validated}  onClick={() => openScoped(p, 'leads')} />
-                <StageChip icon="★" label="Qualified"  value={c.qualified}  onClick={() => openScoped(p, 'selected')} />
-                <StageChip icon="⚗" label="Researched" value={c.researched} onClick={() => openScoped(p, 'research_results')} />
+                <StageChip tone="sky"     label="Captured"   value={c.captured}   onClick={() => onOpenWorkspace(p.id!)} />
+                <StageChip tone="violet"  label="Validated"  value={c.validated}  onClick={() => onOpenWorkspace(p.id!)} />
+                <StageChip tone="amber"   label="Qualified"  value={c.qualified}  onClick={() => onOpenWorkspace(p.id!)} />
+                <StageChip tone="emerald" label="Researched" value={c.researched} onClick={() => onOpenWorkspace(p.id!)} />
               </div>
+
+              {/* Conversion footer — qualified-through-rate */}
+              {c.captured > 0 && (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 h-1.5 rounded-full bg-gray-800 overflow-hidden">
+                    <div className="h-full bg-gradient-to-r from-amber-400 to-emerald-500 rounded-full transition-all duration-700" style={{ width: `${qualifiedRate}%` }} />
+                  </div>
+                  <span className="text-[10px] text-gray-500 shrink-0">
+                    <span className="text-gray-300 font-semibold">{qualifiedRate}%</span> qualified
+                  </span>
+                </div>
+              )}
 
               {/* Actions */}
               <div className="flex items-center gap-1.5 flex-wrap">
                 <button
-                  onClick={() => openScoped(p, 'leads')}
-                  className="text-xs px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+                  onClick={() => onOpenWorkspace(p.id!)}
+                  className="text-xs px-3.5 py-1.5 rounded-lg font-medium text-white transition-all active:scale-95
+                    bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 hover:shadow-md hover:shadow-indigo-900/40"
                 >
                   Open Workspace →
-                </button>
-                <button
-                  onClick={() => openScoped(p, 'company_intelligence')}
-                  className="text-xs px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors"
-                >
-                  Intelligence
                 </button>
                 <button
                   onClick={() => {
@@ -211,7 +246,7 @@ export default function SearchSessionCards({ onNavigate }: { onNavigate: (s: Nav
                   }`}
                   title="View / edit this session's ICP profile"
                 >
-                  🎯 ICP
+                  ICP
                 </button>
                 <span className="flex-1" />
                 <button
@@ -239,6 +274,7 @@ export default function SearchSessionCards({ onNavigate }: { onNavigate: (s: Nav
                   </div>
                 </div>
               )}
+              </div>
             </div>
           )
         })}
@@ -247,16 +283,26 @@ export default function SearchSessionCards({ onNavigate }: { onNavigate: (s: Nav
   )
 }
 
-function StageChip({ icon, label, value, onClick }: { icon: string; label: string; value: number; onClick: () => void }) {
+type StageTone = 'sky' | 'violet' | 'amber' | 'emerald'
+const STAGE_TONES: Record<StageTone, { bg: string; border: string; dot: string }> = {
+  sky:     { bg: 'bg-sky-500/10',     border: 'border-sky-500/25 hover:border-sky-500/60',         dot: 'bg-sky-500' },
+  violet:  { bg: 'bg-violet-500/10',  border: 'border-violet-500/25 hover:border-violet-500/60',   dot: 'bg-violet-500' },
+  amber:   { bg: 'bg-amber-500/10',   border: 'border-amber-500/25 hover:border-amber-500/60',     dot: 'bg-amber-500' },
+  emerald: { bg: 'bg-emerald-500/10', border: 'border-emerald-500/25 hover:border-emerald-500/60', dot: 'bg-emerald-500' },
+}
+
+function StageChip({ tone, label, value, onClick }: { tone: StageTone; label: string; value: number; onClick: () => void }) {
+  const t = STAGE_TONES[tone]
   return (
     <button
       onClick={onClick}
-      className="flex flex-col items-center gap-0.5 px-1 py-2 bg-gray-950/70 border border-gray-800 rounded-lg
-        hover:border-blue-700 hover:bg-blue-950/30 transition-colors group"
+      className={`flex flex-col items-center gap-0.5 px-1 py-2.5 rounded-xl border ${t.bg} ${t.border}
+        transition-all duration-150 hover:-translate-y-0.5 active:scale-95`}
       title={`Open ${label.toLowerCase()} leads for this session`}
     >
-      <span className="text-sm font-semibold text-white group-hover:text-blue-300">{value}</span>
-      <span className="text-[10px] text-gray-600 group-hover:text-blue-400">{icon} {label}</span>
+      <span className={`w-1.5 h-1.5 rounded-full ${t.dot}`} />
+      <span className="text-base font-bold text-white leading-none mt-0.5">{value}</span>
+      <span className="text-[10px] text-gray-500">{label}</span>
     </button>
   )
 }
