@@ -11,6 +11,7 @@ import { MSG } from '@/types/messages'
 import { COUNTRIES, flag } from './SearchConsole'
 import { timeAgo } from '@/utils/date'
 import LeadTable from './LeadTable'
+import PipelineControl from './PipelineControl'
 import type { SearchProject } from '@/types/searchProject'
 import type { Lead } from '@/types/lead'
 import type { SelectedLead, ResearchedLead } from '@/types/derivedLeads'
@@ -170,6 +171,11 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
             <WTile label="Scored"     value={s.scored}     accent="text-indigo-400"  onClick={() => setTab('leads')} />
             <WTile label="Enriched"   value={s.enriched}   accent="text-sky-400"     onClick={() => setTab('leads')} />
             <WTile label="Researched" value={s.researched} accent="text-violet-400"  onClick={() => setTab('leads')} />
+          </div>
+          {/* Per-session pipeline controls — Stop / Continue / Re-run */}
+          <div className="flex items-center gap-2 flex-wrap bg-gray-900 border border-gray-800 rounded-xl p-3">
+            <span className="text-xs text-gray-500 font-medium mr-1">Pipeline</span>
+            <PipelineControl projectId={projectId} />
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <button onClick={() => setTab('leads')} className="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg border border-gray-700 transition-colors">View all leads</button>

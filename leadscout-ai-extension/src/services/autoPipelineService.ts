@@ -6,6 +6,7 @@
 //   4. Auto-start the research queue
 // User only needs to enter country, city, keyword and click Start once.
 
+import { db } from '@/db/db'
 import { leadRepository } from '@/db/leadRepository'
 import { searchProjectRepository } from '@/db/searchProjectRepository'
 import { activityLogRepository } from '@/db/activityLogRepository'
@@ -17,17 +18,32 @@ import { MSG } from '@/types/messages'
 import { toast } from '@/state/useToastStore'
 import type { AppSettings } from '@/types/settings'
 
+// Re-run (force): drop enrichment records + reset status so the whole scope is
+// reprocessed from scratch. Scoped to a project when given.
+async function resetScopeForRerun(projectId?: number): Promise<void> {
+  let leads = await leadRepository.getAll()
+  if (projectId !== undefined) leads = leads.filter((l) => (l.projectId ?? -1) === projectId)
+  const ids = leads.map((l) => l.id!).filter((x): x is number => !!x)
+  if (!ids.length) return
+  await db.researchResults.where('leadId').anyOf(ids).and((r) => r.jobId === 0).delete().catch(() => {})
+  await leadRepository.updateMany(ids, { status: 'new' })
+}
+
 export async function runAutoValidationAndResearch(
   settings: AppSettings,
   opts?: {
     onPhaseChange?: (phase: string) => void
     onProgress?: (done: number, total: number) => void
     shouldStop?: () => boolean | Promise<boolean>
+    projectId?: number   // scope to one session (undefined = all sessions)
+    force?: boolean      // re-run: reprocess every lead in scope, not just 'new'
   },
 ): Promise<void> {
   const onPhaseChange = opts?.onPhaseChange
   const onProgress = opts?.onProgress
   const shouldStop = opts?.shouldStop ?? (async () => false)
+  const projectId = opts?.projectId
+  const force = opts?.force ?? false
 
   const { provider, apiKey } = await resolveAiCredentials(settings)
   if (!apiKey.trim()) {
@@ -37,7 +53,11 @@ export async function runAutoValidationAndResearch(
     return
   }
 
-  const newLeads = (await leadRepository.getAll()).filter((l) => l.status === 'new')
+  if (force) await resetScopeForRerun(projectId)
+
+  let scoped = await leadRepository.getAll()
+  if (projectId !== undefined) scoped = scoped.filter((l) => (l.projectId ?? -1) === projectId)
+  const newLeads = scoped.filter((l) => l.status === 'new')
   if (newLeads.length === 0) return
   if (await shouldStop()) return
 

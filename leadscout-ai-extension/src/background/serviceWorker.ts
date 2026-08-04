@@ -143,6 +143,7 @@ interface PipelineState {
   phase?: string
   processed: number
   total: number
+  projectId?: number   // which session this run is scoped to (undefined = all)
   updatedAt: number
 }
 
@@ -158,13 +159,13 @@ async function isPipelineStopRequested(): Promise<boolean> {
 
 let pipelineRunning = false
 
-async function runPipeline() {
+async function runPipeline(projectId?: number, force = false) {
   if (pipelineRunning) return
   const settings = await loadSettingsForResearch()
 
   pipelineRunning = true
   await chrome.storage.local.set({ pipeline_stop: false })
-  await setPipelineState({ status: 'running', phase: 'starting', processed: 0, total: 0 })
+  await setPipelineState({ status: 'running', phase: 'starting', processed: 0, total: 0, projectId })
   chrome.alarms.create(PIPELINE_KEEPALIVE, { periodInMinutes: 0.4 }) // hold the worker up mid-run
 
   const lastSession = activeSession
@@ -182,7 +183,7 @@ async function runPipeline() {
   const shouldStop = () => isPipelineStopRequested()
 
   try {
-    await runAutoValidationAndResearch(settings, { onPhaseChange, onProgress, shouldStop })
+    await runAutoValidationAndResearch(settings, { onPhaseChange, onProgress, shouldStop, projectId, force })
     await setPipelineState({ status: (await isPipelineStopRequested()) ? 'stopped' : 'done' })
   } catch (err) {
     console.error('[pipeline] failed:', err)
@@ -1484,9 +1485,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (type === MSG.PIPELINE_RUN) {
+    const { projectId, force } = (msg.payload ?? {}) as { projectId?: number; force?: boolean }
     chrome.storage.local.set({ pipeline_stop: false })
-      .then(() => runPipeline())
-      .then(() => {})
+      .then(() => runPipeline(projectId, force))
       .catch(() => {})
     sendResponse({ ok: true })
     return true
