@@ -75,11 +75,25 @@ export default function PipelineControl({ projectId }: { projectId?: number }) {
     </span>
   )
 
+  // Progress bar while running — determinate when a total is known, otherwise a
+  // subtle indeterminate pulse (e.g. the brief 'starting' phase).
+  const total = statusHere?.total ?? 0
+  const processed = statusHere?.processed ?? 0
+  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0
+  const bar = (width: string) => (
+    <div className={`${width} h-1.5 rounded-full bg-gray-800 overflow-hidden`}>
+      {total > 0
+        ? <div className="h-full bg-blue-500 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+        : <div className="h-full w-1/3 bg-blue-500/70 rounded-full animate-pulse" />}
+    </div>
+  )
+
   // Topbar (global) — status + Stop while running.
   if (!sessionMode) {
     return (
       <div className="flex items-center gap-2">
         {pill}
+        {runningHere && bar('w-24')}
         {state?.status === 'running' && (
           <button onClick={stop} className="text-xs px-2.5 py-1 rounded-lg bg-red-900/50 hover:bg-red-800 text-red-200 border border-red-800/50 transition-colors">Stop</button>
         )}
@@ -89,8 +103,9 @@ export default function PipelineControl({ projectId }: { projectId?: number }) {
 
   // Session workspace — Stop / Continue / Re-run.
   return (
-    <div className="flex items-center gap-2 flex-wrap">
+    <div className="flex items-center gap-3 flex-wrap">
       {pill}
+      {runningHere && bar('w-44')}
       {runningHere ? (
         <button onClick={stop} className="text-sm px-4 py-2 rounded-lg font-medium bg-red-900/50 hover:bg-red-800 text-red-200 border border-red-800/50 transition-colors">Stop</button>
       ) : (
