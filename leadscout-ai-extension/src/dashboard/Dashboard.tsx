@@ -29,6 +29,7 @@ import type { ProgressUpdatePayload } from '@/types/messages'
 import { researchJobRepository } from '@/db/researchJobRepository'
 import { searchSessionRepository } from '@/db/searchSessionRepository'
 import { leadRepository } from '@/db/leadRepository'
+import { importedLeadRepo } from '@/db/pipelineLeadRepository'
 import { existingClientRepository } from '@/db/existingClientRepository'
 import { fetchExistingClients } from '@/services/sqlSyncService'
 import { syncDerivedLeads } from '@/services/derivedLeadsService'
@@ -47,7 +48,9 @@ export default function Dashboard() {
   // whenever the user switched pages.
   const [totalLeadCount, setTotalLeadCount] = useState(0)
   const refreshTotalLeadCount = useCallback(() => {
-    leadRepository.getAll().then((all) => setTotalLeadCount(all.length)).catch(() => {})
+    // Lead Database shows imported leads only, so its badge counts importedLeads
+    // (not the scraped/session leads, which live in their session workspaces).
+    importedLeadRepo.count().then(setTotalLeadCount).catch(() => {})
   }, [])
 
   const { load: loadSettings, settings } = useSettingsStore()

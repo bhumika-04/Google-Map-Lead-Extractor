@@ -1,6 +1,6 @@
 // Single source of truth for the DeepLead API base URL.
 //
-// Default is the hosted backend, but it can be overridden AT RUNTIME from the
+// Default is the local API, but it can be overridden AT RUNTIME from the
 // extension UI (Backup & Restore → API Endpoint). The override is stored in
 // chrome.storage.local and applied live across every context (dashboard +
 // service worker) via the storage change listener below — no rebuild needed.
@@ -8,7 +8,7 @@
 // API_BASE is a mutable `let` export: callers read `${API_BASE}/api/...` and,
 // thanks to ESM live bindings, pick up runtime changes automatically.
 
-export const DEFAULT_API_BASE = 'https://deeplead.indusanalytics.co.in'
+export const DEFAULT_API_BASE = 'http://localhost:5150'
 const STORAGE_KEY = 'deeplead_api_base'
 
 export let API_BASE = DEFAULT_API_BASE
