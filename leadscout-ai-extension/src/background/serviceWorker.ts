@@ -24,6 +24,13 @@ import { discoverLeads } from '@/services/directoryDiscovery'
 import { syncToSql, isApiAvailable, fetchApiConfig, restoreFromSql, saveLeadBatchToSql, saveValidationBulkToSql, createSearchRunInSql, updateSearchRunInSql, fetchSearchRuns } from '@/services/sqlSyncService'
 import { pushBackup } from '@/services/backupSyncService'
 import { runAutoValidationAndResearch } from '@/services/autoPipelineService'
+// Dual-write to the redesigned schema (sessions + scrapedLeads) — mirrors capture
+// into the new tables without disturbing the proven legacy capture path.
+import { sessionRepository } from '@/db/sessionRepository'
+import { scrapedLeadRepo } from '@/db/pipelineLeadRepository'
+import { createSessionInSql, saveLeadBatchToSql as savePipelineBatchToSql } from '@/services/pipelineSyncService'
+import type { ScrapedLead } from '@/types/pipelineLead'
+import type { SessionRecord } from '@/types/session'
 import { researchResultRepository } from '@/db/researchResultRepository'
 import { db } from '@/db/db'
 import type { AppSettings } from '@/types/settings'
@@ -58,6 +65,34 @@ interface ActiveSession {
   status: string
   projectId?: number    // Search Session this capture belongs to — stamped on every lead
   mssqlRunId?: number   // MSSQL search_runs.id — sent with lead batch saves
+  // Dual-write mirror targets (redesigned schema)
+  scrapedSessionId?: number
+  scrapedSessionMssqlId?: number
+}
+
+// Map a legacy Lead to the redesigned scraped_leads shape for the dual-write mirror.
+function toScrapedLead(l: Omit<Lead, 'id'>, sessionId: number): Omit<ScrapedLead, 'id'> {
+  const now = nowISO()
+  return {
+    sessionId,
+    companyName: l.companyName,
+    normalizedName: l.normalizedName,
+    category: l.category,
+    rating: l.rating,
+    reviewCount: l.reviewCount,
+    address: l.address,
+    phone: l.phone,
+    website: l.website,
+    googleMapsUrl: l.googleMapsUrl,
+    city: l.city,
+    keyword: l.keyword,
+    country: l.country,
+    status: 'new',
+    enrichmentStatus: 'pending',
+    researchStatus: 'none',
+    capturedAt: l.capturedAt ?? now,
+    updatedAt: now,
+  }
 }
 
 let activeSession: ActiveSession | null = null
@@ -189,6 +224,8 @@ async function handleSearchStart(payload: SearchStartPayload, senderTabId?: numb
   // run id is created lazily here if the API was down when the project was
   // created, so lead batch saves can always carry their run tag.
   let mssqlRunId: number | undefined
+  let scrapedSessionId: number | undefined
+  let scrapedSessionMssqlId: number | undefined
   if (payload.projectId !== undefined) {
     const project = await searchProjectRepository.getById(payload.projectId).catch(() => undefined)
     if (project) {
@@ -200,6 +237,28 @@ async function handleSearchStart(payload: SearchStartPayload, senderTabId?: numb
         }
       }
       mssqlRunId = project.mssqlRunId
+
+      // Dual-write: ensure a redesigned-schema `session` mirrors this project, so
+      // capture also populates sessions + scrapedLeads (+ new API), without
+      // touching the legacy leads path below.
+      if (project.newSessionId) {
+        scrapedSessionId = project.newSessionId
+        scrapedSessionMssqlId = project.newSessionMssqlId
+      } else {
+        const rec: SessionRecord = {
+          name: project.name, source: 'scrape', country: project.country,
+          keywords: project.keywords ?? [], cities: project.cities ?? [],
+          businessProfile: project.businessProfile ?? '', status: 'running',
+          totalLeads: 0, createdAt: nowISO(),
+        }
+        const sid = await sessionRepository.create(rec).catch(() => undefined)
+        if (sid) {
+          scrapedSessionId = sid
+          const smid = await createSessionInSql({ ...rec, id: sid }).catch(() => null)
+          scrapedSessionMssqlId = smid ?? undefined
+          await searchProjectRepository.update(project.id!, { newSessionId: sid, newSessionMssqlId: smid ?? undefined }).catch(() => {})
+        }
+      }
     }
   }
 
@@ -216,6 +275,8 @@ async function handleSearchStart(payload: SearchStartPayload, senderTabId?: numb
     status: 'running',
     projectId: payload.projectId,
     mssqlRunId,
+    scrapedSessionId,
+    scrapedSessionMssqlId,
   }
 
   // Cache settings once per session — avoids a DB read on every LEAD_FOUND message
@@ -288,6 +349,24 @@ async function handleLeadFound(payload: LeadFoundPayload) {
     session.totalCaptured++
     await searchSessionRepository.incrementCaptured(session.sessionId)
     await log('lead_captured', `Captured: ${lead.companyName}`, session.sessionId, { leadId: id })
+
+    // Dual-write mirror → redesigned schema (sessions + scrapedLeads + new API).
+    if (session.scrapedSessionId) {
+      const sid = session.scrapedSessionId
+      await scrapedLeadRepo.upsertCapture(sid, [toScrapedLead(lead, sid) as any]).catch(() => {})
+      await sessionRepository.addLeads(sid, 1).catch(() => {})
+      if (session.scrapedSessionMssqlId && session.totalCaptured % 10 === 0) {
+        const recent = await scrapedLeadRepo.getBySession(sid)
+        savePipelineBatchToSql('scraped', session.scrapedSessionMssqlId, recent as ScrapedLead[])
+          .then(async (idMap) => {
+            for (const r of recent) {
+              const serverId = idMap[r.normalizedName]
+              if (serverId && r.id && r.mssqlId !== serverId) await scrapedLeadRepo.update(r.id, { mssqlId: serverId })
+            }
+          })
+          .catch(() => {})
+      }
+    }
 
     // Save to MSSQL every 10 leads — direct DB write, not just a backup
     if (session.totalCaptured % 10 === 0) {

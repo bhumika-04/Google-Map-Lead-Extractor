@@ -21,6 +21,10 @@ export interface SearchProject {
   totalLeads: number         // captured (non-duplicate) leads across the run
   source: 'search_console' | 'batch_campaign'
   mssqlRunId?: number        // search_runs.id in MSSQL — set after first sync
+  // Dual-write bridge to the redesigned schema: the mirror `sessions` row this
+  // project maps to, so capture also populates sessions/scrapedLeads.
+  newSessionId?: number      // local Dexie sessions.id
+  newSessionMssqlId?: number // MSSQL sessions.id
   createdAt: string
   completedAt?: string
 }
