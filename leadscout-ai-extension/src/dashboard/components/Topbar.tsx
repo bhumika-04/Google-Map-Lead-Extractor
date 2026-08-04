@@ -4,6 +4,7 @@ import { useCaptureStore } from '@/state/useCaptureStore'
 import type { PipelinePhase } from '@/state/useCaptureStore'
 import { useSettingsStore } from '@/state/useSettingsStore'
 import { isApiAvailable } from '@/services/sqlSyncService'
+import PipelineControl from './PipelineControl'
 import SessionSwitcher from './SessionSwitcher'
 
 const TITLES: Record<NavSection, string> = {
@@ -113,6 +114,9 @@ export default function Topbar({ section }: TopbarProps) {
       )}
 
       <div className="ml-auto flex items-center gap-3">
+        {/* Background pipeline status + Stop/Re-run (accurate on any page) */}
+        <PipelineControl />
+
         {/* API health indicator */}
         <div className="flex items-center gap-1.5 text-xs" title={apiOnline === null ? 'Checking API…' : apiOnline ? 'DeepLead API online' : 'DeepLead API offline — start the API server'}>
           <span className={`w-2 h-2 rounded-full ${apiOnline === null ? 'bg-gray-600' : apiOnline ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />

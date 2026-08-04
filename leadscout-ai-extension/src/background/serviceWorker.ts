@@ -130,24 +130,73 @@ async function focusDashboardTab() {
 // scraping finishes. Lives here — not in a dashboard page component — because the
 // service worker is the only context guaranteed to be alive when capture ends; the
 // user should never have to have a specific dashboard tab/page open for this to fire.
-async function maybeRunAutoPipeline() {
-  const settings = await loadSettingsForResearch()
-  if (!settings.autoValidate) return
+// ─── Pipeline control + persisted status ──────────────────────────────────────
+// The auto-pipeline (enrichment → validation → research) runs in this worker so
+// it survives page navigation. Two problems it must handle: (1) MV3 kills an idle
+// worker mid-run — a keepalive alarm holds it up; (2) the user wants Stop / Re-run
+// — a stop flag in storage is checked between leads, and status is persisted so any
+// page can show it and offer a Re-run button.
+const PIPELINE_KEEPALIVE = 'pipeline-keepalive'
 
-  // Broadcast pipeline phase changes to the dashboard so the Topbar can show
-  // clear status (quick_enrichment_running → validation_running → research_queued).
-  const lastSession = activeSession  // may be null here — that's fine for the phase broadcast
+interface PipelineState {
+  status: 'idle' | 'running' | 'stopped' | 'done'
+  phase?: string
+  processed: number
+  total: number
+  updatedAt: number
+}
+
+async function setPipelineState(patch: Partial<PipelineState>) {
+  const cur: PipelineState = (await chrome.storage.local.get('pipeline_state')).pipeline_state
+    ?? { status: 'idle', processed: 0, total: 0, updatedAt: 0 }
+  await chrome.storage.local.set({ pipeline_state: { ...cur, ...patch, updatedAt: Date.now() } })
+}
+
+async function isPipelineStopRequested(): Promise<boolean> {
+  return !!(await chrome.storage.local.get('pipeline_stop')).pipeline_stop
+}
+
+let pipelineRunning = false
+
+async function runPipeline() {
+  if (pipelineRunning) return
+  const settings = await loadSettingsForResearch()
+
+  pipelineRunning = true
+  await chrome.storage.local.set({ pipeline_stop: false })
+  await setPipelineState({ status: 'running', phase: 'starting', processed: 0, total: 0 })
+  chrome.alarms.create(PIPELINE_KEEPALIVE, { periodInMinutes: 0.4 }) // hold the worker up mid-run
+
+  const lastSession = activeSession
   const onPhaseChange = (phase: string) => {
+    setPipelineState({ phase }).catch(() => {})
     broadcastProgress({
       sessionId: lastSession?.sessionId ?? 0,
       totalCaptured: lastSession?.totalCaptured ?? 0,
       duplicatesSkipped: lastSession?.duplicatesSkipped ?? 0,
-      status: 'completed',   // keep capture status as completed — phase is separate
+      status: 'completed',
       pipelinePhase: phase,
     })
   }
+  const onProgress = (done: number, total: number) => { setPipelineState({ processed: done, total }).catch(() => {}) }
+  const shouldStop = () => isPipelineStopRequested()
 
-  runAutoValidationAndResearch(settings, onPhaseChange).catch(() => {})
+  try {
+    await runAutoValidationAndResearch(settings, { onPhaseChange, onProgress, shouldStop })
+    await setPipelineState({ status: (await isPipelineStopRequested()) ? 'stopped' : 'done' })
+  } catch (err) {
+    console.error('[pipeline] failed:', err)
+    await setPipelineState({ status: 'stopped' })
+  } finally {
+    pipelineRunning = false
+    chrome.alarms.clear(PIPELINE_KEEPALIVE).catch(() => {})
+  }
+}
+
+async function maybeRunAutoPipeline() {
+  const settings = await loadSettingsForResearch()
+  if (!settings.autoValidate) return
+  runPipeline().catch(() => {})
 }
 
 function updateBadge(count: number, status: string) {
@@ -1434,6 +1483,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true
   }
 
+  if (type === MSG.PIPELINE_RUN) {
+    chrome.storage.local.set({ pipeline_stop: false })
+      .then(() => runPipeline())
+      .then(() => {})
+      .catch(() => {})
+    sendResponse({ ok: true })
+    return true
+  }
+
+  if (type === MSG.PIPELINE_STOP) {
+    chrome.storage.local.set({ pipeline_stop: true })
+      .then(() => setPipelineState({ status: 'stopped' }))
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: err?.message }))
+    return true
+  }
+
   if (type === MSG.BATCH_CAMPAIGN_START) {
     handleBatchCampaignStart(msg.payload)
       .then((r) => sendResponse(r))
@@ -1782,6 +1848,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     resumeStalledSearchQueue().catch((err) => console.error('[search-queue] resume failed:', err))
   }
   if (alarm.name === NURTURE_ALARM)   checkNurtureSequences()
+  // Keepalive: firing this alarm resets the worker's idle timer so a long
+  // pipeline run isn't killed mid-way when the dashboard tab loses focus.
+  if (alarm.name === PIPELINE_KEEPALIVE) { /* no-op — presence keeps the worker warm */ }
 })
 
 async function ensureResearchAlarm() {

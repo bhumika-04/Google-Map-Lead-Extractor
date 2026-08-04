@@ -19,8 +19,16 @@ import type { AppSettings } from '@/types/settings'
 
 export async function runAutoValidationAndResearch(
   settings: AppSettings,
-  onPhaseChange?: (phase: string) => void,
+  opts?: {
+    onPhaseChange?: (phase: string) => void
+    onProgress?: (done: number, total: number) => void
+    shouldStop?: () => boolean | Promise<boolean>
+  },
 ): Promise<void> {
+  const onPhaseChange = opts?.onPhaseChange
+  const onProgress = opts?.onProgress
+  const shouldStop = opts?.shouldStop ?? (async () => false)
+
   const { provider, apiKey } = await resolveAiCredentials(settings)
   if (!apiKey.trim()) {
     const msg = `Auto-pipeline skipped — add a ${provider} API key to DeepLeadApi/appsettings.json and restart the backend`
@@ -31,18 +39,21 @@ export async function runAutoValidationAndResearch(
 
   const newLeads = (await leadRepository.getAll()).filter((l) => l.status === 'new')
   if (newLeads.length === 0) return
+  if (await shouldStop()) return
 
   console.log(`[auto-pipeline] 🚀 Starting — ${newLeads.length} new leads`)
 
-  // ── Step 1: Gemini grounding enrichment (writes fields live per lead) ─────
+  // ── Step 1: enrichment (writes fields live per lead) ──────────────────────
   onPhaseChange?.('quick_enrichment_running')
-  toast.info(`⚙ Step 1/3 — Enriching ${newLeads.length} leads with Gemini grounding…`)
+  toast.info(`Step 1/3 — Enriching ${newLeads.length} leads…`)
   console.log(`[auto-pipeline] Step 1: enrichment`)
   try {
-    await runPreValidationEnrichment(newLeads, settings, apiKey)
+    await runPreValidationEnrichment(newLeads, settings, apiKey, onProgress, shouldStop)
   } catch (err) {
     console.warn('[auto-pipeline] Enrichment error (non-fatal):', err)
   }
+
+  if (await shouldStop()) return
 
   // ── Step 2: ICP batch validation ──────────────────────────────────────────
   onPhaseChange?.('validation_running')
@@ -66,6 +77,7 @@ export async function runAutoValidationAndResearch(
 
   try {
     for (const [pid, groupLeads] of groups) {
+      if (await shouldStop()) break
       const project = pid >= 0 ? await searchProjectRepository.getById(pid) : undefined
       const profile = (project?.businessProfile?.trim() || settings.businessProfile).trim()
       if (!profile) {

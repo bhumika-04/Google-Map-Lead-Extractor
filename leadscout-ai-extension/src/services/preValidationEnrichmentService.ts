@@ -35,6 +35,7 @@ export async function runPreValidationEnrichment(
   settings: AppSettings,
   _apiKey: string,
   onProgress?: (done: number, total: number) => void,
+  shouldStop?: () => boolean | Promise<boolean>,
 ): Promise<void> {
   const geminiApiKey = settings.geminiApiKey?.trim()
   const geminiModel  = settings.geminiModel || 'gemini-flash-latest'
@@ -71,6 +72,10 @@ export async function runPreValidationEnrichment(
   const total = toEnrich.length
 
   for (let i = 0; i < toEnrich.length; i++) {
+    if (shouldStop && await shouldStop()) {
+      console.log(`[enrichment] ⏹ Stop requested — halting at ${i}/${total}`)
+      break
+    }
     const lead = toEnrich[i]
     if (!lead.id) continue
 
