@@ -1,7 +1,7 @@
 // Outreach service — logs all sent messages + stage changes to MSSQL.
 // Works alongside interaktService.ts (WhatsApp) and direct channel opens (LinkedIn, Email, etc.)
 
-const API = 'http://localhost:5150'
+import { API_BASE as API } from '@/config/api'
 
 export type OutreachChannel = 'whatsapp' | 'linkedin' | 'email' | 'instagram' | 'facebook'
 

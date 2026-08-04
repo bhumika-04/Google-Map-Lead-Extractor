@@ -1,12 +1,12 @@
 // Syncs captured leads + research results to the local DeepLead SQL API.
-// The API runs on http://localhost:5150 and writes to the MSSQL 'deeplead' database.
+// The API base is set in src/config/api.ts (hosted URL or localhost) and writes to MSSQL.
 
 import type { Lead } from '@/types/lead'
 import type { ResearchResult } from '@/types/research'
 import type { DeepResearch } from '@/types/deepResearch'
 import type { LinkedInCompanyProfile, LinkedInPost, LinkedInPerson } from '@/types/linkedinData'
 
-const API_BASE = 'http://localhost:5150'
+import { API_BASE } from '@/config/api'
 
 export async function isApiAvailable(): Promise<boolean> {
   try {

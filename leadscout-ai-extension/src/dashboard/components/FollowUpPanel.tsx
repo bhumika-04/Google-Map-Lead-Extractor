@@ -6,7 +6,7 @@ import { STAGE_META, CHANNEL_META } from '@/services/outreachService'
 import type { ConversationStage } from '@/services/outreachService'
 import { exportRowsToCSV, type ExportRowInput } from '@/utils/csvExport'
 
-const API = 'http://localhost:5150'
+import { API_BASE as API } from '@/config/api'
 
 interface FollowUpItem {
   conversationId: string

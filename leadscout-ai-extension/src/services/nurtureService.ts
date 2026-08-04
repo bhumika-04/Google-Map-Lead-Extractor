@@ -1,7 +1,7 @@
 // Nurture service — manages message templates and scheduled sequences in MSSQL.
 // Templates define the message body + timing. Sequences schedule a template for a specific company.
 
-const API = 'http://localhost:5150'
+import { API_BASE as API } from '@/config/api'
 
 export interface NurtureTemplate {
   id: string

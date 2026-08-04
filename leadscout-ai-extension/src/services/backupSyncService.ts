@@ -1,7 +1,7 @@
 import { db } from '@/db/db'
 import { nowISO } from '@/utils/date'
 
-const API = 'http://localhost:5150'
+import { API_BASE as API } from '@/config/api'
 const TIMEOUT_MS = 5000
 
 async function isBackendAvailable(): Promise<boolean> {

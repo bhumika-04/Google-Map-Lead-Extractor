@@ -54,6 +54,7 @@
     "https://api.anthropic.com/*",
     "https://api.openai.com/*",
     "http://localhost:5150/*",
+    "https://deeplead.indusanalytics.co.in/*",
     "<all_urls>"
   ],
   "web_accessible_resources": [

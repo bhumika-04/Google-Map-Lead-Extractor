@@ -4,7 +4,7 @@
 import type { SearchEvidence, SourcePage } from '@/types/searchEvidence'
 import type { CompanyResearch } from '@/types/searchEvidence'
 
-const API_BASE = 'http://localhost:5150'
+import { API_BASE } from '@/config/api'
 
 interface SearchEvidenceDto {
   query: string; title: string; url: string; displayUrl: string; snippet: string

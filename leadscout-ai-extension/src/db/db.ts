@@ -7,6 +7,8 @@ import type { DeepResearch } from '@/types/deepResearch'
 import type { BatchCampaign } from '@/types/batchCampaign'
 import type { ExistingClient } from '@/types/existingClient'
 import type { SelectedLead, ResearchedLead } from '@/types/derivedLeads'
+import type { SessionRecord } from '@/types/session'
+import type { ScrapedLead, ImportedLead } from '@/types/pipelineLead'
 // SearchEvidence, SourcePage, CompanyResearch removed from IndexedDB (version 8).
 // Phase 3 data is stored exclusively in MSSQL via apiResearchService.
 
@@ -38,6 +40,11 @@ export class LeadScoutDB extends Dexie {
   // Dedicated per-stage tables — materialized from `leads` (which stays the master).
   selectedLeads!: Table<SelectedLead, number>
   researchedLeads!: Table<ResearchedLead, number>
+  // ─── Redesigned schema (v12) — mirror of MSSQL sessions/scraped_leads/imported_leads.
+  // These replace leads/searchProjects going forward; the old tables stay during migration.
+  sessions!: Table<SessionRecord, number>
+  scrapedLeads!: Table<ScrapedLead, number>
+  importedLeads!: Table<ImportedLead, number>
   // searchEvidence, sourcePages, companyResearch removed — Phase 3 data lives in MSSQL only
 
   constructor() {
@@ -180,6 +187,28 @@ export class LeadScoutDB extends Dexie {
       searchProjects: '++id, status, createdAt',
       selectedLeads:   'leadId, projectId, icpScore, selectedAt',
       researchedLeads: 'leadId, projectId, researchedAt',
+    })
+
+    // Version 12: redesigned schema — sessions + scraped_leads + imported_leads
+    // (mirrors the new MSSQL layout). Added alongside the legacy tables so the
+    // app keeps working while flows are migrated over incrementally.
+    this.version(12).stores({
+      searchSessions: '++id, status, city, keyword, createdAt',
+      leads:          '++id, sessionId, projectId, status, normalizedName, city, keyword, phone, googleMapsUrl, validationStatus, icpScore, capturedAt',
+      researchJobs:   '++id, leadId, sessionId, status, jobType, createdAt',
+      researchResults:'++id, leadId, jobId, createdAt',
+      deepResearch:   '++id, researchResultId, leadId, researchedAt',
+      activityLogs:   '++id, sessionId, type, createdAt',
+      settings:       'key',
+      batchCampaigns: '++id, status, createdAt',
+      existingClients:'++id, normalizedName, city, phone, normalizedPhone, uploadedAt',
+      searchProjects: '++id, status, createdAt',
+      selectedLeads:   'leadId, projectId, icpScore, selectedAt',
+      researchedLeads: 'leadId, projectId, researchedAt',
+      // New redesigned tables
+      sessions:       '++id, mssqlId, source, status, createdAt',
+      scrapedLeads:   '++id, mssqlId, sessionId, status, normalizedName, validationStatus, researchStatus, icpScore, capturedAt',
+      importedLeads:  '++id, mssqlId, sessionId, status, normalizedName, validationStatus, researchStatus, icpScore, capturedAt',
     })
   }
 }

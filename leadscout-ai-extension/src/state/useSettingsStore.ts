@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { DEFAULT_SETTINGS, type AppSettings } from '@/types/settings'
 import { db } from '@/db/db'
 
-const API_BASE = 'http://localhost:5150'
+import { API_BASE } from '@/config/api'
 
 // Fields that come from the backend — overwrite local values whenever backend is reachable.
 // UI-only prefs (theme, lastCity, searchPresets) stay in IndexedDB.

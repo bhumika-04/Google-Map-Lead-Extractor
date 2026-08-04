@@ -562,13 +562,20 @@ export default function SearchConsole() {
   async function addTopCities(n: number) {
     if (fetchingTier !== null) return
     const countryName = COUNTRIES.find((c) => c.code === country)?.name ?? country
+    console.log(`[SearchConsole] Top ${n} clicked for ${countryName} (${country})`)
     setFetchingTier(n)
     try {
       const cities = await fetchTopCities(country, countryName, n, settings)
+      console.log(`[SearchConsole] fetchTopCities returned ${cities.length} cities for ${countryName} (requested ${n})`, cities)
       if (!cities.length) { toast.error(`No cities returned for ${countryName}`); return }
-      setSelectedCities((prev) => [...new Set([...prev, ...cities])])
-      toast.success(`Added ${cities.length} top ${countryName} cities`)
+      setSelectedCities((prev) => {
+        const merged = [...new Set([...prev, ...cities])]
+        console.log(`[SearchConsole] merged: ${prev.length} existing + ${cities.length} fetched = ${merged.length} total selected`)
+        return merged
+      })
+      toast.success(`Added ${cities.length} top ${countryName} cities (AI returned ${cities.length} of ${n} requested)`)
     } catch (err: any) {
+      console.error(`[SearchConsole] addTopCities(${n}) failed:`, err)
       toast.error(err?.message ?? 'Could not fetch cities')
     } finally {
       setFetchingTier(null)

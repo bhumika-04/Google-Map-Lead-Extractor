@@ -5,7 +5,7 @@ import { nowISO } from '@/utils/date'
 import { clearAllLocalData } from '@/services/backupSyncService'
 import { restoreFromSql, isApiAvailable } from '@/services/sqlSyncService'
 
-const API = 'http://localhost:5150'
+import { API_BASE as API, getApiBase, setApiBase, DEFAULT_API_BASE } from '@/config/api'
 
 interface BackupData {
   version: number
@@ -25,6 +25,8 @@ export default function BackupRestoreSection() {
   const [exporting, setExporting]   = useState(false)
   const [apiUp, setApiUp]           = useState<boolean | null>(null)
   const [counts, setCounts]         = useState({ leads: 0, results: 0, jobs: 0 })
+  const [apiUrl, setApiUrl]         = useState(getApiBase())
+  const [savingUrl, setSavingUrl]   = useState(false)
 
   async function refreshCounts() {
     const [leads, results, jobs] = await Promise.all([
@@ -40,12 +42,35 @@ export default function BackupRestoreSection() {
     isApiAvailable().then(setApiUp)
   }, [])
 
+  // ── Change the API endpoint at runtime (hosted ↔ local dev) ─────────────────
+  async function handleSaveApiUrl() {
+    setSavingUrl(true)
+    try {
+      const saved = await setApiBase(apiUrl)
+      setApiUrl(saved)
+      const ok = await isApiAvailable()
+      setApiUp(ok)
+      if (ok) toast.success(`Connected to ${saved}`)
+      else    toast.warning(`Saved ${saved} — but it's not reachable`)
+    } finally {
+      setSavingUrl(false)
+    }
+  }
+
+  async function handleResetApiUrl() {
+    const saved = await setApiBase(DEFAULT_API_BASE)
+    setApiUrl(saved)
+    const ok = await isApiAvailable()
+    setApiUp(ok)
+    toast.info(`Reset to default: ${saved}`)
+  }
+
   // ── Sync from Database (MSSQL → IndexedDB) ─────────────────────────────────
   async function handleSyncFromDb() {
     setSyncing(true)
     try {
       const ok = await isApiAvailable()
-      if (!ok) { toast.error('Backend not reachable at localhost:5150'); return }
+      if (!ok) { toast.error(`Backend not reachable at ${API}`); return }
 
       const data = await restoreFromSql()
       if (!data) { toast.error('Could not fetch data from MSSQL'); return }
@@ -188,10 +213,54 @@ export default function BackupRestoreSection() {
   return (
     <div className="max-w-4xl mx-auto space-y-5">
 
+      {/* API endpoint — switch backend (hosted ↔ local) without a rebuild */}
+      <div className="bg-gray-900 border border-blue-800/40 rounded-xl p-5 space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold text-white">API Endpoint</h3>
+          <p className="text-xs text-gray-500 mt-1">
+            The backend the extension talks to. Switch between the hosted server and a local dev API here — applies immediately across the whole extension, no rebuild.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={apiUrl}
+            onChange={(e) => setApiUrl(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleSaveApiUrl() }}
+            placeholder={DEFAULT_API_BASE}
+            spellCheck={false}
+            className="flex-1 bg-gray-800 border border-gray-700 text-white text-sm px-3 py-2 rounded-lg
+              focus:outline-none focus:border-blue-500 placeholder-gray-600 font-mono"
+          />
+          <button
+            onClick={handleSaveApiUrl}
+            disabled={savingUrl}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors"
+          >
+            {savingUrl ? 'Saving…' : 'Save'}
+          </button>
+          <button
+            onClick={handleResetApiUrl}
+            className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white text-sm rounded-lg transition-colors"
+            title={`Reset to ${DEFAULT_API_BASE}`}
+          >
+            Reset
+          </button>
+        </div>
+        <div className="text-xs flex items-center gap-2">
+          {apiUp === null
+            ? <span className="text-gray-500">Checking…</span>
+            : apiUp
+              ? <span className="text-green-400">● Reachable</span>
+              : <span className="text-red-400">● Not reachable</span>}
+          <span className="text-gray-600">·  Default: {DEFAULT_API_BASE}</span>
+        </div>
+      </div>
+
       {/* API status banner */}
       {apiUp === false && (
         <div className="bg-red-950/40 border border-red-800/50 rounded-xl px-4 py-3 text-xs text-red-300">
-          Backend not reachable at <code>localhost:5150</code> — start the DeepLead API first.
+          Backend not reachable at <code>{API}</code> — check the DeepLead API is up.
         </div>
       )}
 

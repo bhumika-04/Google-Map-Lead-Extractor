@@ -13,20 +13,30 @@ const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 const CLAUDE_URL  = 'https://api.anthropic.com/v1/messages'
 
-const CACHE_PREFIX = 'topcities_v1_'
+const CACHE_PREFIX = 'topcities_v3_'  // bumped: invalidates old single-shot cached lists (now batched)
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 30 // 30 days — city rankings barely change
 
 interface CacheEntry { cities: string[]; fetchedAt: number }
 
-function buildPrompt(countryName: string, count: number): string {
-  return `List the top ${count} most significant cities and large towns in ${countryName} for B2B business outreach, ranked by population and commercial importance (most important first).
+function buildPrompt(countryName: string, count: number, exclude: string[] = []): string {
+  const continuing = exclude.length > 0
+  const head = continuing
+    ? `List ${count} MORE cities and large towns in ${countryName} for B2B business outreach — continuing down the list by population and commercial importance, after the ones already listed below. Include tier-2, tier-3 and district towns to reach the count.`
+    : `List the top ${count} most significant cities and large towns in ${countryName} for B2B business outreach, ranked by population and commercial importance (most important first).`
+
+  const rules = `
 
 Rules:
 - Return ONLY a compact JSON array of city-name strings in English. No numbering, no commentary, no markdown fences.
-- Give up to ${count} distinct, real cities/towns that actually exist in ${countryName}. If ${countryName} has fewer than ${count} notable cities, return only as many as genuinely exist — do NOT pad with fake or duplicate names.
-- Use the common English spelling of each city.
+- Give ${count} distinct, real cities/towns that actually exist in ${countryName}. Do NOT invent fake names or repeat any already-listed city.
+- Use the common English spelling of each city.`
 
-Example format: ["City One","City Two","City Three"]`
+  // Bounded exclude list keeps the prompt small; client-side dedup catches the rest.
+  const excludeNote = continuing
+    ? `\n\nAlready listed — do NOT repeat any of these:\n${exclude.slice(-220).join(', ')}`
+    : ''
+
+  return `${head}${rules}${excludeNote}\n\nExample format: ["City One","City Two","City Three"]`
 }
 
 function parseCityList(text: string): string[] {
@@ -123,21 +133,20 @@ async function writeCache(key: string, cities: string[]): Promise<void> {
  * @throws if no AI key is configured or every provider fails.
  */
 async function runAiText(prompt: string, settings: AppSettings): Promise<string> {
-  const attempts: (() => Promise<string>)[] = []
-  if (settings.openAiApiKey)    attempts.push(() => callOpenAi(prompt, settings.openAiApiKey, settings.openAiModel))
-  if (settings.geminiApiKey)    attempts.push(() => callGemini(prompt, settings.geminiApiKey, settings.geminiModel))
-  if (settings.anthropicApiKey) attempts.push(() => callClaude(prompt, settings.anthropicApiKey, settings.anthropicModel))
+  const attempts: { name: string; run: () => Promise<string> }[] = []
+  if (settings.openAiApiKey)    attempts.push({ name: 'openai (local)',    run: () => callOpenAi(prompt, settings.openAiApiKey, settings.openAiModel) })
+  if (settings.geminiApiKey)    attempts.push({ name: 'gemini (local)',    run: () => callGemini(prompt, settings.geminiApiKey, settings.geminiModel) })
+  if (settings.anthropicApiKey) attempts.push({ name: 'anthropic (local)', run: () => callClaude(prompt, settings.anthropicApiKey, settings.anthropicModel) })
 
   // No key in extension settings → fall back to the backend-configured key
-  // (DeepLeadApi appsettings.json, served at /api/config). This is where most
-  // installs actually keep the key, so validation/research work but these
-  // helpers would otherwise silently fail.
+  // (DeepLeadApi appsettings.json, served at /api/config).
   if (attempts.length === 0) {
     const cred = await resolveAiCredentials(settings).catch(() => null)
+    console.log(`[cityService] no local key; backend provider=${cred?.provider ?? 'none'} hasKey=${!!cred?.apiKey}`)
     if (cred?.apiKey) {
-      if (cred.provider === 'openai')         attempts.push(() => callOpenAi(prompt, cred.apiKey, settings.openAiModel))
-      else if (cred.provider === 'anthropic') attempts.push(() => callClaude(prompt, cred.apiKey, settings.anthropicModel))
-      else                                    attempts.push(() => callGemini(prompt, cred.apiKey, settings.geminiModel))
+      if (cred.provider === 'openai')         attempts.push({ name: 'openai (backend)',    run: () => callOpenAi(prompt, cred.apiKey, settings.openAiModel) })
+      else if (cred.provider === 'anthropic') attempts.push({ name: 'anthropic (backend)', run: () => callClaude(prompt, cred.apiKey, settings.anthropicModel) })
+      else                                    attempts.push({ name: 'gemini (backend)',    run: () => callGemini(prompt, cred.apiKey, settings.geminiModel) })
     }
   }
 
@@ -148,9 +157,15 @@ async function runAiText(prompt: string, settings: AppSettings): Promise<string>
   let lastErr: unknown
   for (const attempt of attempts) {
     try {
-      const text = await attempt()
-      if (text && text.trim()) return text
+      console.log(`[cityService] calling ${attempt.name}...`)
+      const text = await attempt.run()
+      if (text && text.trim()) {
+        console.log(`[cityService] ${attempt.name} returned ${text.length} chars`)
+        return text
+      }
+      console.warn(`[cityService] ${attempt.name} returned empty response`)
     } catch (err) {
+      console.warn(`[cityService] ${attempt.name} failed:`, err instanceof Error ? err.message : err)
       lastErr = err
     }
   }
@@ -171,11 +186,45 @@ export async function fetchTopCities(
   const cacheKey = `${CACHE_PREFIX}${countryCode}_${count}`
   if (!opts?.force) {
     const cached = await readCache(cacheKey)
-    if (cached) return cached.cities
+    if (cached) {
+      console.log(`[cityService] fetchTopCities ${countryName} x${count}: CACHE HIT — ${cached.cities.length} cities (delete key "${cacheKey}" in storage to refetch)`)
+      return cached.cities
+    }
   }
 
-  const text = await runAiText(buildPrompt(countryName, count), settings)
-  const cities = parseCityList(text).slice(0, count)
+  // Models won't emit a 500-item list in one shot (gpt-4o-mini stops ~130).
+  // So we fetch in batches of BATCH, telling the model what it already gave, and
+  // merge until we reach `count` or a batch adds nothing new (country exhausted).
+  const BATCH = 100
+  const collected: string[] = []
+  const seen = new Set<string>()
+  const maxRounds = Math.ceil(count / BATCH) + 2 // a couple extra to recover short batches
+
+  console.log(`[cityService] fetchTopCities ${countryName}: requesting ${count} cities (batched by ${BATCH})...`)
+  for (let round = 0; round < maxRounds && collected.length < count; round++) {
+    const want = Math.min(BATCH, count - collected.length)
+    let text: string
+    try {
+      text = await runAiText(buildPrompt(countryName, want, collected), settings)
+    } catch (err) {
+      console.warn(`[cityService] ${countryName} batch ${round + 1} failed:`, err instanceof Error ? err.message : err)
+      break
+    }
+    let added = 0
+    for (const c of parseCityList(text)) {
+      const key = c.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      collected.push(c)
+      added++
+      if (collected.length >= count) break
+    }
+    console.log(`[cityService] ${countryName} batch ${round + 1}: requested ${want}, +${added} new, total ${collected.length}/${count}`)
+    if (added === 0) { console.log(`[cityService] ${countryName}: model returned no new cities — stopping at ${collected.length}`); break }
+  }
+
+  const cities = collected.slice(0, count)
+  console.log(`[cityService] fetchTopCities ${countryName}: FINAL ${cities.length} cities (requested ${count})`)
   if (!cities.length) throw new Error(`No cities returned for ${countryName}`)
 
   await writeCache(cacheKey, cities)
