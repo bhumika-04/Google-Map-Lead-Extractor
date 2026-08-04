@@ -1,48 +1,30 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { mapRow } from '@/utils/csvImport'
+import { mapImportedRow } from '@/utils/csvImport'
 import { parseSpreadsheet, isSpreadsheetFile, IMPORT_ACCEPT } from '@/utils/spreadsheet'
-import { leadRepository } from '@/db/leadRepository'
-import { searchProjectRepository } from '@/db/searchProjectRepository'
-import { isDuplicate } from '@/utils/dedupe'
-import { addToResearchQueue } from '@/services/futureResearchService'
-import { syncDerivedLeads } from '@/services/derivedLeadsService'
-import { useLeadStore } from '@/state/useLeadStore'
+import { sessionRepository } from '@/db/sessionRepository'
+import { importedLeadRepo } from '@/db/pipelineLeadRepository'
+import {
+  createSessionInSql, saveLeadBatchToSql,
+} from '@/services/pipelineSyncService'
 import { useSettingsStore } from '@/state/useSettingsStore'
 import { toast } from '@/state/useToastStore'
 import { activityLogRepository } from '@/db/activityLogRepository'
-import { MSG } from '@/types/messages'
-import type { SearchProject } from '@/types/searchProject'
-import type { Lead } from '@/types/lead'
+import type { SessionRecord } from '@/types/session'
+import type { ImportedLead, PipelineLeadStatus } from '@/types/pipelineLead'
 
 // Per-screen import behaviour. The same panel is reused on Lead Database,
-// Selected Leads, and Research Queue — only the target status (and whether we
-// queue research) changes, so imports always match the screen they land on.
+// Selected Leads, and Research Queue — only the target status changes, so
+// imports always match the screen they land on. All imports write to the
+// imported_leads store (never mixed with scraped/session leads).
 export type ImportMode = 'leads' | 'selected' | 'research'
 
-const MODE_META: Record<ImportMode, { title: string; blurb: string; cta: string }> = {
-  leads: {
-    title: 'Import CSV / Excel',
-    blurb: 'Add rows as new leads in a session — they flow through the normal pipeline',
-    cta: 'Import as new leads',
-  },
-  selected: {
-    title: 'Import CSV / Excel to Selected',
-    blurb: 'Bring in an outside list — lands as Selected, ready for research',
-    cta: 'Import to Selected',
-  },
-  research: {
-    title: 'Import CSV / Excel to Research',
-    blurb: 'Import a list and queue every row for deep research immediately',
-    cta: 'Import & queue research',
-  },
+const MODE_META: Record<ImportMode, { title: string; blurb: string; cta: string; status: PipelineLeadStatus }> = {
+  leads:    { title: 'Import CSV / Excel',              blurb: 'Add rows as new imported leads',                     cta: 'Import as new leads',   status: 'new' },
+  selected: { title: 'Import CSV / Excel to Selected',  blurb: 'Bring in an outside list — lands as Selected',       cta: 'Import to Selected',    status: 'selected' },
+  research: { title: 'Import CSV / Excel to Research',  blurb: 'Import a list and queue every row for research',     cta: 'Import & queue research', status: 'research_queued' },
 }
 
-interface ImportPanelProps {
-  mode: ImportMode
-}
-
-export default function ImportPanel({ mode }: ImportPanelProps) {
-  const { loadLeads } = useLeadStore()
+export default function ImportPanel({ mode }: { mode: ImportMode }) {
   const { settings } = useSettingsStore()
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -51,26 +33,22 @@ export default function ImportPanel({ mode }: ImportPanelProps) {
   const [rows, setRows] = useState<Record<string, string>[]>([])
   const [importing, setImporting] = useState(false)
 
-  // Target session: an existing project id, or 'new' to create one on import.
-  const [projects, setProjects] = useState<SearchProject[]>([])
+  // Target import session: an existing one, or 'new' to create on import.
+  const [sessions, setSessions] = useState<SessionRecord[]>([])
   const [target, setTarget] = useState<number | 'new' | ''>('')
   const [newName, setNewName] = useState('')
 
   const meta = MODE_META[mode]
 
-  async function refreshProjects() {
-    const all = await searchProjectRepository.getAll().catch(() => [])
-    setProjects(all)
-    // Default the selector to the most recent session if none picked yet.
+  async function refreshSessions() {
+    const all = await sessionRepository.getBySource('import').catch(() => [])
+    setSessions(all)
     setTarget((prev) => (prev === '' && all[0]?.id !== undefined ? all[0].id! : prev))
   }
-  useEffect(() => { if (open) refreshProjects() }, [open])
+  useEffect(() => { if (open) refreshSessions() }, [open])
 
   async function readFile(file: File) {
-    if (!isSpreadsheetFile(file.name)) {
-      toast.warning('Please choose a .csv, .xlsx or .xls file')
-      return
-    }
+    if (!isSpreadsheetFile(file.name)) { toast.warning('Please choose a .csv, .xlsx or .xls file'); return }
     setFileName(file.name)
     try {
       const { rows: parsed } = await parseSpreadsheet(file)
@@ -87,104 +65,69 @@ export default function ImportPanel({ mode }: ImportPanelProps) {
     if (fileRef.current) fileRef.current.value = ''
   }
 
-  async function resolveProjectId(): Promise<number | null> {
+  // Resolve (and if needed create) the target import session — returns its local id + mssqlId.
+  async function resolveSession(): Promise<{ id: number; mssqlId?: number } | null> {
     if (target === 'new') {
       const name = newName.trim()
       if (!name) { toast.warning('Name the new session first'); return null }
-      const id = await searchProjectRepository.create({
-        name,
+      const rec: SessionRecord = {
+        name, source: 'import',
         country: settings.lastCountry || 'IN',
-        keywords: [],
-        cities: [],
+        keywords: [], cities: [],
         businessProfile: settings.businessProfile ?? '',
-        status: 'completed',           // an imported list is not a live capture run
-        totalTerms: 0,
-        completedTerms: 0,
-        totalLeads: 0,
-        source: 'search_console',
-      })
-      return id
+        status: 'completed', totalLeads: 0,
+        createdAt: new Date().toISOString(),
+      }
+      const id = await sessionRepository.create(rec)
+      const mssqlId = await createSessionInSql({ ...rec, id }).catch(() => null)
+      if (mssqlId) await sessionRepository.update(id, { mssqlId })
+      return { id, mssqlId: mssqlId ?? undefined }
     }
-    if (typeof target === 'number') return target
+    if (typeof target === 'number') {
+      const s = await sessionRepository.getById(target)
+      return s?.id ? { id: s.id, mssqlId: s.mssqlId } : null
+    }
     toast.warning('Pick a session to import into (or create a new one)')
     return null
   }
 
   async function handleImport() {
     if (rows.length === 0) return
-    const projectId = await resolveProjectId()
-    if (projectId === null) return
+    const session = await resolveSession()
+    if (!session) return
 
     setImporting(true)
-    let created = 0, upgraded = 0, skipped = 0, queued = 0
-    const toQueue: Lead[] = []
-
+    const leads: Array<Omit<ImportedLead, 'id'>> = []
+    let skipped = 0
     for (const row of rows) {
-      const mapped = mapRow(row, 0)
-      if (!mapped) { skipped++; continue }
+      const lead = mapImportedRow(row, session.id, meta.status)
+      if (!lead) { skipped++; continue }
+      leads.push(lead)
+    }
 
-      mapped.projectId = projectId
-      if (mode === 'selected' || mode === 'research') {
-        mapped.status = 'selected'
-        mapped.validationStatus = 'relevant'
-        mapped.validationReason = 'Imported via file'
-      } else {
-        mapped.status = 'new'
-      }
+    // Local write (dedupe on session + normalizedName).
+    const saved = await importedLeadRepo.upsertCapture(
+      session.id,
+      leads as Array<Partial<ImportedLead> & { normalizedName: string; companyName: string }>,
+    )
+    await sessionRepository.addLeads(session.id, saved)
 
+    // Best-effort sync to the backend + backfill mssqlId.
+    if (session.mssqlId) {
       try {
-        const candidates = await leadRepository.findCandidatesForDedupe(
-          0, mapped.normalizedName, mapped.phone, mapped.googleMapsUrl,
-        )
-        const existing = isDuplicate(mapped, candidates)
-
-        if (existing?.id) {
-          // Never downgrade a lead already further along; assign it to this
-          // session if it had none, and upgrade to Selected when appropriate.
-          const patch: Partial<Lead> = {}
-          if (existing.projectId === undefined) patch.projectId = projectId
-          if ((mode === 'selected' || mode === 'research') && (existing.status === 'new' || existing.status === 'rejected')) {
-            patch.status = 'selected'
-            patch.validationStatus = 'relevant'
-            patch.validationReason = 'Imported via file'
-            upgraded++
-          } else {
-            skipped++
-          }
-          if (Object.keys(patch).length) await leadRepository.updateMany([existing.id], patch)
-          const fresh = await leadRepository.getById(existing.id)
-          if (fresh && (fresh.status === 'selected' || fresh.status.startsWith('research'))) toQueue.push(fresh)
-        } else {
-          const id = await leadRepository.create(mapped)
-          created++
-          const fresh = await leadRepository.getById(id)
-          if (fresh) toQueue.push(fresh)
+        const idMap = await saveLeadBatchToSql('imported', session.mssqlId, leads as ImportedLead[], fileName)
+        const rowsNow = await importedLeadRepo.getBySession(session.id)
+        for (const r of rowsNow) {
+          const serverId = idMap[r.normalizedName]
+          if (serverId && r.id && r.mssqlId !== serverId) await importedLeadRepo.update(r.id, { mssqlId: serverId })
         }
-      } catch {
-        skipped++
-      }
+      } catch { /* offline — local stays source of truth */ }
     }
 
-    // Keep the session's lead count roughly in step.
-    if (created > 0) {
-      const p = projects.find((x) => x.id === projectId)
-      searchProjectRepository.update(projectId, { totalLeads: (p?.totalLeads ?? 0) + created }).catch(() => {})
-    }
-
-    if (mode === 'research') {
-      for (const lead of toQueue) {
-        try { await addToResearchQueue(lead); queued++ } catch { /* already queued */ }
-      }
-      if (queued > 0) chrome.runtime.sendMessage({ type: MSG.TRIGGER_RESEARCH }).catch(() => {})
-    }
-
-    await loadLeads()
-    await refreshProjects()
-    await syncDerivedLeads()   // reflect imported selected/research leads in the dedicated tables
     setImporting(false)
     reset()
-
-    const summary = `Import: ${created} added${upgraded ? `, ${upgraded} upgraded` : ''}${skipped ? `, ${skipped} skipped` : ''}${mode === 'research' && queued ? ` — ${queued} queued for research` : ''}`
+    await refreshSessions()
+    const summary = `Imported ${saved} leads${skipped ? `, ${skipped} skipped (no company name)` : ''}`
     toast.success(summary)
     activityLogRepository.log('csv_import', `${meta.title} — ${summary}`).catch(() => {})
   }
@@ -205,16 +148,14 @@ export default function ImportPanel({ mode }: ImportPanelProps) {
         <div className="px-4 pb-4 space-y-3">
           {/* Target session picker */}
           <div className="flex items-center gap-2 flex-wrap">
-            <label className="text-xs text-gray-500">Session</label>
+            <label className="text-xs text-gray-500">Import session</label>
             <select
               value={target}
               onChange={(e) => setTarget(e.target.value === 'new' ? 'new' : e.target.value === '' ? '' : Number(e.target.value))}
               className="bg-gray-800 border border-gray-700 text-white text-xs px-2 py-1.5 rounded-lg focus:outline-none focus:border-blue-500 max-w-[220px]"
             >
               <option value="">Select a session…</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
+              {sessions.map((s) => (<option key={s.id} value={s.id}>{s.name}</option>))}
               <option value="new">➕ New session…</option>
             </select>
             {target === 'new' && (
@@ -235,13 +176,8 @@ export default function ImportPanel({ mode }: ImportPanelProps) {
             onClick={() => fileRef.current?.click()}
             className="border-2 border-dashed border-gray-700 rounded-xl px-4 py-5 text-center hover:border-blue-600 transition-colors cursor-pointer group"
           >
-            <input
-              ref={fileRef}
-              type="file"
-              accept={IMPORT_ACCEPT}
-              className="hidden"
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) readFile(f) }}
-            />
+            <input ref={fileRef} type="file" accept={IMPORT_ACCEPT} className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) readFile(f) }} />
             {fileName ? (
               <div className="text-sm text-white font-medium">
                 {fileName} <span className="text-xs text-gray-500 font-normal">— {rows.length} rows</span>
@@ -259,9 +195,7 @@ export default function ImportPanel({ mode }: ImportPanelProps) {
           {rows.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap">
               <span className="flex-1" />
-              <button onClick={reset} className="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-lg transition-colors">
-                Clear
-              </button>
+              <button onClick={reset} className="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-lg transition-colors">Clear</button>
               <button
                 onClick={handleImport}
                 disabled={importing}
@@ -273,7 +207,7 @@ export default function ImportPanel({ mode }: ImportPanelProps) {
           )}
 
           <div className="text-[11px] text-gray-600">
-            Duplicates of existing leads are updated in place, never duplicated. Imported rows are tagged to the chosen session and appear in its pipeline.
+            Imported leads go to the Lead Database (kept separate from scraped session leads). Duplicates within a session are updated in place.
           </div>
         </div>
       )}

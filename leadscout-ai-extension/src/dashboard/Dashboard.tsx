@@ -4,7 +4,7 @@ import Topbar from './components/Topbar'
 import SearchConsole from './components/SearchConsole'
 import SearchSessionCards from './components/SearchSessionCards'
 import ProgressCards from './components/ProgressCards'
-import LeadTable from './components/LeadTable'
+import ImportedLeadsTable from './components/ImportedLeadsTable'
 import ActivityLogPanel from './components/ActivityLogPanel'
 import ToastContainer from './components/Toast'
 import LeadDetailPanel from './components/LeadDetailPanel'
@@ -15,7 +15,6 @@ import ResearchPage from './components/ResearchPage'
 import MarketsPage from './components/MarketsPage'
 import SessionDashboard from './components/SessionDashboard'
 import SessionWorkspace from './components/SessionWorkspace'
-import ValidationPanel from './components/ValidationPanel'
 import BatchCampaignPanel from './components/BatchCampaignPanel'
 import FollowUpPanel from './components/FollowUpPanel'
 import NurturePanel from './components/NurturePanel'
@@ -187,14 +186,13 @@ export default function Dashboard() {
             {section === 'leads'    && (
               <div className="flex flex-col flex-1 min-h-0 gap-5">
                 <ImportPanel mode="leads" />
-                <LeadTable title="All Leads" />
+                <ImportedLeadsTable mode="leads" />
               </div>
             )}
             {section === 'selected' && (
               <div className="flex flex-col flex-1 min-h-0 gap-5">
-                <ValidationPanel />
                 <ImportPanel mode="selected" />
-                <LeadTable title="Selected Leads" filterStatus="selected" />
+                <ImportedLeadsTable mode="selected" />
               </div>
             )}
             {section === 'session_pipeline'  && <SessionDashboard onNavigate={setSection} onOpenWorkspace={setWorkspaceId} />}
