@@ -29,6 +29,26 @@ async function resetScopeForRerun(projectId?: number): Promise<void> {
   await leadRepository.updateMany(ids, { status: 'new' })
 }
 
+type ValidationResult = Awaited<ReturnType<typeof validateLeads>>[number]
+
+// Persist one batch of validation results immediately, so the workspace funnel
+// (Scored / Relevant) climbs live during a long validation run instead of
+// jumping only at the very end.
+async function persistValidationBatch(batch: ValidationResult[]): Promise<void> {
+  if (!batch.length) return
+  const rel = batch.filter((r) => r.relevant)
+  const notRel = batch.filter((r) => !r.relevant)
+  await leadRepository.bulkUpdateValidation([
+    ...rel.map((r)    => ({ id: r.leadId, status: 'relevant'     as const, reason: r.reason })),
+    ...notRel.map((r) => ({ id: r.leadId, status: 'not_relevant' as const, reason: r.reason })),
+  ])
+  await leadRepository.updateMany(rel.map((r) => r.leadId), { status: 'selected' })
+  await leadRepository.bulkUpdateIcpFields(batch.map((r) => ({
+    id: r.leadId, icpScore: r.icpScore, icpStatus: r.icpStatus,
+    icpReason: r.reason, icpScoreBreakdown: r.scoreBreakdown,
+  })))
+}
+
 export async function runAutoValidationAndResearch(
   settings: AppSettings,
   opts?: {
@@ -95,6 +115,7 @@ export async function runAutoValidationAndResearch(
     else groups.set(key, [l])
   }
 
+  const CHUNK = 20
   try {
     for (const [pid, groupLeads] of groups) {
       if (await shouldStop()) break
@@ -107,7 +128,15 @@ export async function runAutoValidationAndResearch(
         continue
       }
       if (project) console.log(`[auto-pipeline] Validating ${groupLeads.length} leads with "${project.name}" profile`)
-      results = results.concat(await validateLeads(groupLeads, profile, apiKey, provider, () => {}))
+      // Validate in chunks and persist each chunk immediately → Scored/Relevant climb live.
+      for (let i = 0; i < groupLeads.length; i += CHUNK) {
+        if (await shouldStop()) break
+        const chunk = groupLeads.slice(i, i + CHUNK)
+        const chunkResults = await validateLeads(chunk, profile, apiKey, provider, () => {})
+        await persistValidationBatch(chunkResults)
+        results = results.concat(chunkResults)
+        onProgress?.(Math.min(i + CHUNK, groupLeads.length), groupLeads.length)
+      }
     }
   } catch (err) {
     if (err instanceof DailyQuotaExhaustedError) {
@@ -123,22 +152,7 @@ export async function runAutoValidationAndResearch(
 
   const relevant    = results.filter((r) => r.relevant)
   const notRelevant = results.filter((r) => !r.relevant)
-
-  // Persist validation + ICP scores to IndexedDB
-  await leadRepository.bulkUpdateValidation([
-    ...relevant.map((r)    => ({ id: r.leadId, status: 'relevant'     as const, reason: r.reason })),
-    ...notRelevant.map((r) => ({ id: r.leadId, status: 'not_relevant' as const, reason: r.reason })),
-  ])
-  await leadRepository.updateMany(relevant.map(r => r.leadId), { status: 'selected' })
-  await leadRepository.bulkUpdateIcpFields(
-    results.map(r => ({
-      id:                r.leadId,
-      icpScore:          r.icpScore,
-      icpStatus:         r.icpStatus,
-      icpReason:         r.reason,
-      icpScoreBreakdown: r.scoreBreakdown,
-    }))
-  )
+  // (Validation + ICP scores were already persisted per chunk above.)
 
   // Sync to MSSQL
   const allTouched = await Promise.all(results.map((r) => leadRepository.getById(r.leadId)))

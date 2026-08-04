@@ -92,11 +92,11 @@ export default function PipelineControl({ projectId }: { projectId?: number }) {
     <div className="flex items-center gap-2 flex-wrap">
       {pill}
       {runningHere ? (
-        <button onClick={stop} className="text-xs px-3 py-1.5 rounded-lg bg-red-900/50 hover:bg-red-800 text-red-200 border border-red-800/50 transition-colors">Stop</button>
+        <button onClick={stop} className="text-sm px-4 py-2 rounded-lg font-medium bg-red-900/50 hover:bg-red-800 text-red-200 border border-red-800/50 transition-colors">Stop</button>
       ) : (
         <>
-          <button onClick={cont} className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors">Continue</button>
-          <button onClick={rerun} className="text-xs px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition-colors">Re-run all</button>
+          <button onClick={cont} className="text-sm px-4 py-2 rounded-lg font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors">Continue</button>
+          <button onClick={rerun} className="text-sm px-4 py-2 rounded-lg font-medium bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 transition-colors">Re-run all</button>
         </>
       )}
     </div>

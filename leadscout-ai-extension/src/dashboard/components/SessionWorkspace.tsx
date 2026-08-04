@@ -173,25 +173,24 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
             <WTile label="Researched" value={s.researched} accent="text-violet-400"  onClick={() => setTab('leads')} />
           </div>
           {/* Per-session pipeline controls — Stop / Continue / Re-run */}
-          <div className="flex items-center gap-2 flex-wrap bg-gray-900 border border-gray-800 rounded-xl p-3">
-            <span className="text-xs text-gray-500 font-medium mr-1">Pipeline</span>
+          <div className="flex items-center gap-3 flex-wrap bg-gray-900 border border-gray-800 rounded-xl px-4 py-3">
+            <span className="text-sm text-gray-400 font-medium">Pipeline</span>
             <PipelineControl projectId={projectId} />
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => setTab('leads')} className="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg border border-gray-700 transition-colors">View all leads</button>
-            <button onClick={() => setTab('selected')} className="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg border border-gray-700 transition-colors">View selected</button>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <button onClick={() => setTab('leads')} className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors">View all leads</button>
+            <button onClick={() => setTab('selected')} className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors">View selected</button>
             <button
               onClick={queueRelevantForResearch}
               disabled={queuing}
-              className="text-xs px-3 py-1.5 rounded-lg text-white transition-all disabled:opacity-50
-                bg-gradient-to-r from-violet-700 to-purple-700 hover:from-violet-600 hover:to-purple-600 active:scale-95"
+              className="text-sm px-4 py-2 rounded-lg font-medium text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50 transition-colors"
             >
               {queuing ? 'Queuing…' : 'Queue relevant for research'}
             </button>
             <button
               onClick={() => { chrome.runtime.sendMessage({ type: MSG.TRIGGER_RESEARCH }).catch(() => {}); toast.success('Research triggered') }}
-              className="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg border border-gray-700 transition-colors"
-            >▶ Run research now</button>
+              className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors"
+            >Run research now</button>
           </div>
           {project?.businessProfile?.trim() && (
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
