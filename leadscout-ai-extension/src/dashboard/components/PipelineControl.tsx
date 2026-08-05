@@ -22,6 +22,7 @@ const PHASE_LABEL: Record<string, string> = {
   validation_running: 'Validating',
   validation_completed: 'Validated',
   research_queued: 'Queuing research',
+  verifying: 'Verifying from Google',
 }
 
 export default function PipelineControl({ projectId }: { projectId?: number }) {

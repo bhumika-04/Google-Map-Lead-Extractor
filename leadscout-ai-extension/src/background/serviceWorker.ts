@@ -29,6 +29,8 @@ import { runAutoValidationAndResearch } from '@/services/autoPipelineService'
 import { sessionRepository } from '@/db/sessionRepository'
 import { scrapedLeadRepo } from '@/db/pipelineLeadRepository'
 import { createSessionInSql, saveLeadBatchToSql as savePipelineBatchToSql } from '@/services/pipelineSyncService'
+import { verifyLeadsFromGoogle } from '@/services/googleVerifyService'
+import { reconcileScrapedForLeads } from '@/services/scrapedReconcileService'
 import type { ScrapedLead } from '@/types/pipelineLead'
 import type { SessionRecord } from '@/types/session'
 import { researchResultRepository } from '@/db/researchResultRepository'
@@ -198,6 +200,37 @@ async function maybeRunAutoPipeline() {
   const settings = await loadSettingsForResearch()
   if (!settings.autoValidate) return
   runPipeline().catch(() => {})
+}
+
+// On-demand "Verify from Google" — replaces estimated turnover/team size with
+// exact values via Google AI mode. Reuses the pipeline status/keepalive/stop UI.
+async function runVerifyFromGoogle(projectId?: number) {
+  if (pipelineRunning) return
+  pipelineRunning = true
+  await chrome.storage.local.set({ pipeline_stop: false })
+  chrome.alarms.create(PIPELINE_KEEPALIVE, { periodInMinutes: 0.4 })
+
+  try {
+    let leads = await leadRepository.getAll()
+    if (projectId !== undefined) leads = leads.filter((l) => (l.projectId ?? -1) === projectId)
+    // Only leads that still have estimated (unverified) turnover or team size.
+    const targets = leads.filter((l) => !l.turnoverVerified || !l.teamSizeVerified)
+    await setPipelineState({ status: 'running', phase: 'verifying', processed: 0, total: targets.length, projectId })
+
+    const updated = await verifyLeadsFromGoogle(targets, {
+      onProgress: (done, total) => { setPipelineState({ processed: done, total }).catch(() => {}) },
+      shouldStop: () => isPipelineStopRequested(),
+    })
+    reconcileScrapedForLeads(targets, 'enrichment').catch(() => {})
+    await setPipelineState({ status: (await isPipelineStopRequested()) ? 'stopped' : 'done' })
+    await log('system', `Verify from Google: ${updated} leads updated with exact values`).catch(() => {})
+  } catch (err) {
+    console.error('[verify] failed:', err)
+    await setPipelineState({ status: 'stopped' })
+  } finally {
+    pipelineRunning = false
+    chrome.alarms.clear(PIPELINE_KEEPALIVE).catch(() => {})
+  }
 }
 
 function updateBadge(count: number, status: string) {
@@ -1498,6 +1531,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(() => setPipelineState({ status: 'stopped' }))
       .then(() => sendResponse({ ok: true }))
       .catch((err) => sendResponse({ ok: false, error: err?.message }))
+    return true
+  }
+
+  if (type === MSG.VERIFY_FROM_GOOGLE) {
+    const { projectId } = (msg.payload ?? {}) as { projectId?: number }
+    chrome.storage.local.set({ pipeline_stop: false })
+      .then(() => runVerifyFromGoogle(projectId))
+      .catch(() => {})
+    sendResponse({ ok: true })
     return true
   }
 

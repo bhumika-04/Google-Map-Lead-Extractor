@@ -26,6 +26,7 @@ export const MSG = {
   TRIGGER_RESEARCH:  'TRIGGER_RESEARCH',
   PIPELINE_RUN:      'PIPELINE_RUN',   // (re)run enrichment + validation + research
   PIPELINE_STOP:     'PIPELINE_STOP',  // stop the running pipeline
+  VERIFY_FROM_GOOGLE:'VERIFY_FROM_GOOGLE', // fetch exact turnover/team size from Google AI mode
   BACKGROUND_DISCOVER: 'BACKGROUND_DISCOVER',
   DISCOVER_STATUS:   'DISCOVER_STATUS',
 

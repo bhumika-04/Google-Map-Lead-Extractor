@@ -230,6 +230,11 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
               onClick={() => { chrome.runtime.sendMessage({ type: MSG.TRIGGER_RESEARCH }).catch(() => {}); toast.success('Research triggered') }}
               className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors"
             >Run research now</button>
+            <button
+              onClick={() => { chrome.runtime.sendMessage({ type: MSG.VERIFY_FROM_GOOGLE, payload: { projectId } }).catch(() => {}); toast.info('Verifying exact turnover / team size from Google…') }}
+              className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors"
+              title="Fetch exact turnover & team size from Google AI mode (replaces estimates). Slow — one search per lead."
+            >Verify from Google</button>
           </div>
           {project?.businessProfile?.trim() && (
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
