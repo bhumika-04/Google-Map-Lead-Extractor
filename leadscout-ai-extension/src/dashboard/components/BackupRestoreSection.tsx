@@ -75,6 +75,16 @@ export default function BackupRestoreSection() {
       const data = await restoreFromSql()
       if (!data) { toast.error('Could not fetch data from MSSQL'); return }
 
+      // The redesigned API's /api/restore returns { sessions, scrapedLeads,
+      // importedLeads } — no `companies`. The legacy rebuild below only understands
+      // the old shape, so on the new schema we must NOT fall through to the
+      // destructive "0 companies → wipe local data" path (that would delete
+      // everything even though MSSQL is full).
+      if (!Array.isArray((data as { companies?: unknown[] }).companies)) {
+        toast.info('Sync-from-Database is not available on the new schema — local data left unchanged.')
+        return
+      }
+
       const companies = data.companies ?? []
 
       if (companies.length === 0) {
