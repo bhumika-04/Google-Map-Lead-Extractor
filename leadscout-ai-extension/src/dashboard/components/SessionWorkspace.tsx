@@ -3,6 +3,8 @@ import { searchProjectRepository } from '@/db/searchProjectRepository'
 import { leadRepository } from '@/db/leadRepository'
 import { selectedLeadRepository } from '@/db/selectedLeadRepository'
 import { researchedLeadRepository } from '@/db/researchedLeadRepository'
+import { scrapedLeadRepo } from '@/db/pipelineLeadRepository'
+import type { ScrapedLead } from '@/types/pipelineLead'
 import { addToResearchQueue } from '@/services/futureResearchService'
 import { syncDerivedLeads } from '@/services/derivedLeadsService'
 import { useLeadStore } from '@/state/useLeadStore'
@@ -35,6 +37,25 @@ function computeStats(leads: Lead[]) {
   }
 }
 
+// Same funnel, computed from the redesigned scraped_leads rows.
+function computeScrapedStats(rows: ScrapedLead[]) {
+  return {
+    captured: rows.length,
+    enriched: rows.filter((r) => r.enrichmentStatus === 'done').length,
+    scored: rows.filter((r) => r.icpScore !== undefined).length,
+    relevant: rows.filter((r) => r.validationStatus === 'relevant' || r.status === 'selected' || r.status.startsWith('research')).length,
+    researched: rows.filter((r) => r.researchStatus === 'completed').length,
+  }
+}
+
+// Map a scraped_leads row into the shapes the workspace tables already render.
+function toSelectedRow(r: ScrapedLead): SelectedLead {
+  return { leadId: r.id!, projectId: r.sessionId, companyName: r.companyName, icpScore: r.icpScore, category: r.category, phone: r.phone, city: r.city, selectedAt: r.updatedAt } as SelectedLead
+}
+function toResearchedRow(r: ScrapedLead): ResearchedLead {
+  return { leadId: r.id!, projectId: r.sessionId, companyName: r.companyName, decisionMaker: r.decisionMaker, email: r.email, industry: r.industry, annualTurnover: r.annualTurnover, teamSize: r.teamSize, researchedAt: r.researchedAt ?? r.updatedAt } as ResearchedLead
+}
+
 export default function SessionWorkspace({ projectId, onExit }: { projectId: number; onExit: () => void }) {
   const { setProjectScope } = useLeadStore()
   const [project, setProject] = useState<SearchProject | null>(null)
@@ -43,6 +64,7 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
   const [queuing, setQueuing] = useState(false)
   const [selRows, setSelRows] = useState<SelectedLead[]>([])
   const [resRows, setResRows] = useState<ResearchedLead[]>([])
+  const [scraped, setScraped] = useState<ScrapedLead[]>([])
 
   // Scope every lead view to this session while the workspace is open.
   useEffect(() => {
@@ -79,7 +101,22 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     return () => { cancelled = true; clearInterval(t) }
   }, [projectId])
 
-  const s = useMemo(() => computeStats(leads), [leads])
+  // Read-flip: prefer the redesigned scraped_leads (populated by capture +
+  // reconcile). Falls back to the legacy `leads` for any pre-mirror session.
+  useEffect(() => {
+    const sid = project?.newSessionId
+    if (sid === undefined) { setScraped([]); return }
+    let cancelled = false
+    const run = () => scrapedLeadRepo.getBySession(sid).then((r) => { if (!cancelled) setScraped(r) })
+    run()
+    const t = setInterval(run, 4000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [project?.newSessionId])
+
+  const useNew = project?.newSessionId !== undefined && scraped.length > 0
+  const selectedScraped = useMemo(() => scraped.filter((r) => r.status === 'selected'), [scraped])
+  const researchedScraped = useMemo(() => scraped.filter((r) => r.researchStatus === 'completed'), [scraped])
+  const s = useMemo(() => (useNew ? computeScrapedStats(scraped) : computeStats(leads)), [useNew, scraped, leads])
 
   function exit() {
     setProjectScope(null)   // leaving the workspace un-scopes the global lead views
@@ -107,11 +144,13 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
   ]
   const denom = Math.max(s.captured, 1)
 
+  const selectedCount   = useNew ? selectedScraped.length : selRows.length
+  const researchedCount = useNew ? researchedScraped.length : resRows.length
   const tabs: [Tab, string][] = [
     ['overview', 'Overview'],
     ['leads', `Leads (${s.captured})`],
-    ['selected', `Selected (${selRows.length})`],
-    ['researched', `Researched (${resRows.length})`],
+    ['selected', `Selected (${selectedCount})`],
+    ['researched', `Researched (${researchedCount})`],
   ]
 
   return (
@@ -200,9 +239,15 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
           )}
         </div>
       )}
+      {/* Leads tab keeps the full-featured LeadTable (same mirrored data, but with
+          columns/actions/export). Funnel + Selected + Researched read the new tables. */}
       {tab === 'leads' && <LeadTable title="Leads in this session" />}
-      {tab === 'selected' && <SelectedTable rows={selRows} />}
-      {tab === 'researched' && <ResearchedTable rows={resRows} />}
+      {tab === 'selected' && (useNew
+        ? <SelectedTable rows={selectedScraped.map(toSelectedRow)} />
+        : <SelectedTable rows={selRows} />)}
+      {tab === 'researched' && (useNew
+        ? <ResearchedTable rows={researchedScraped.map(toResearchedRow)} />
+        : <ResearchedTable rows={resRows} />)}
     </div>
   )
 }
