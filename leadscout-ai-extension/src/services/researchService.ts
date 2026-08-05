@@ -15,6 +15,7 @@ import { rankAndSelect } from './evidenceRanker'
 import { enqueueLiScrape } from './linkedinScraperService'
 import { aggregateCompanyResearch, mapToLegacyResearchResult, mergeSourcePages } from './companyResearchAggregator'
 import { syncDerivedLeads } from './derivedLeadsService'
+import { mirrorResearchToScraped } from './scrapedReconcileService'
 import type { SearchEvidence, SourcePage } from '@/types/searchEvidence'
 import type { FlatExtractedData } from './evidenceExtractor'
 import type { Lead } from '@/types/lead'
@@ -384,6 +385,8 @@ export async function processNextJob(config: ResearchServiceConfig): Promise<boo
 
     await leadRepository.updateStatus(lead.id!, 'research_completed')
     syncDerivedLeads().catch(() => {})   // refresh the researched-leads table
+    // Mirror the research result into the new scraped_leads (local + new MSSQL).
+    mirrorResearchToScraped(lead, resultData as unknown as ResearchResult).catch(() => {})
 
     // 6b. Queue the LinkedIn deep-scrape (6-month company posts + every core
     // member's activity) when a company LinkedIn URL was discovered. The

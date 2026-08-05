@@ -1,8 +1,9 @@
 import { searchProjectRepository } from '@/db/searchProjectRepository'
 import { leadRepository } from '@/db/leadRepository'
 import { scrapedLeadRepo } from '@/db/pipelineLeadRepository'
-import { saveEnrichmentToSql, saveValidationBulkToSql } from '@/services/pipelineSyncService'
+import { saveEnrichmentToSql, saveValidationBulkToSql, saveResearchToSql } from '@/services/pipelineSyncService'
 import type { Lead } from '@/types/lead'
+import type { ResearchResult } from '@/types/research'
 import type { ScrapedLead, PipelineLeadStatus } from '@/types/pipelineLead'
 
 // Mirror the pipeline fields the proven (legacy) path writes onto old `leads`
@@ -75,6 +76,37 @@ export async function reconcileScrapedFromLeads(
   if (phase === 'validation' && validationItems.length) {
     await saveValidationBulkToSql('scraped', validationItems).catch(() => {})
   }
+}
+
+// Mirror a completed research result for ONE lead into its scraped_leads row
+// (local + new MSSQL). Called right after research finishes for a lead.
+export async function mirrorResearchToScraped(lead: Lead, result: ResearchResult): Promise<void> {
+  if (lead.projectId === undefined) return
+  const project = await searchProjectRepository.getById(lead.projectId).catch(() => undefined)
+  if (!project?.newSessionId) return
+  const scraped = await scrapedLeadRepo.getBySession(project.newSessionId)
+  const sl = scraped.find((s) => s.normalizedName === lead.normalizedName)
+  if (!sl?.id) return
+
+  const patch: Partial<ScrapedLead> = {
+    researchStatus: 'completed',
+    researchSummary: result.summary,
+    research: result as unknown as Record<string, unknown>,
+    researchConfidence: result.confidence,
+    decisionMaker: result.decisionMaker ?? sl.decisionMaker,
+    email: result.email ?? sl.email,
+    annualTurnover: result.annualTurnover ?? sl.annualTurnover,
+    industry: result.industry ?? sl.industry,
+    linkedin: result.linkedIn ?? sl.linkedin,
+    facebook: result.facebook ?? sl.facebook,
+    instagram: result.instagram ?? sl.instagram,
+    twitter: result.twitter ?? sl.twitter,
+    youtube: result.youtube ?? sl.youtube,
+    whatsapp: result.whatsapp ?? sl.whatsapp,
+    status: 'research_completed',
+  }
+  await scrapedLeadRepo.update(sl.id, patch).catch(() => {})
+  if (sl.mssqlId) saveResearchToSql('scraped', sl.mssqlId, { ...sl, ...patch } as ScrapedLead).catch(() => {})
 }
 
 // Convenience: reconcile every distinct session touched by a set of leads.
