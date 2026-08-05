@@ -14,6 +14,7 @@ import { validateLeads, DailyQuotaExhaustedError } from './leadValidationService
 import { saveValidationBulkToSql, saveIcpBulkToSql, resolveAiCredentials } from './sqlSyncService'
 import { addToResearchQueue } from './futureResearchService'
 import { runPreValidationEnrichment } from './preValidationEnrichmentService'
+import { reconcileScrapedForLeads } from './scrapedReconcileService'
 import { MSG } from '@/types/messages'
 import { toast } from '@/state/useToastStore'
 import type { AppSettings } from '@/types/settings'
@@ -93,6 +94,9 @@ export async function runAutoValidationAndResearch(
     console.warn('[auto-pipeline] Enrichment error (non-fatal):', err)
   }
 
+  // Mirror enrichment into the new scraped_leads (local + new MSSQL).
+  reconcileScrapedForLeads(newLeads, 'enrichment').catch(() => {})
+
   if (await shouldStop()) return
 
   // ── Step 2: ICP batch validation ──────────────────────────────────────────
@@ -153,6 +157,9 @@ export async function runAutoValidationAndResearch(
   const relevant    = results.filter((r) => r.relevant)
   const notRelevant = results.filter((r) => !r.relevant)
   // (Validation + ICP scores were already persisted per chunk above.)
+
+  // Mirror validation/ICP into the new scraped_leads (local + new MSSQL).
+  reconcileScrapedForLeads(freshLeads, 'validation').catch(() => {})
 
   // Sync to MSSQL
   const allTouched = await Promise.all(results.map((r) => leadRepository.getById(r.leadId)))
