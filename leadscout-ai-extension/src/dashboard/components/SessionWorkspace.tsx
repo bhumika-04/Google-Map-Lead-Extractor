@@ -137,6 +137,15 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     toast.success('Session ICP updated — used for this session’s next validation & research')
   }
 
+  async function clearToGlobalProfile() {
+    if (!project?.id) return
+    if (!confirm('Clear this session\'s custom ICP and use the global business profile (from appsettings.json) instead?')) return
+    await searchProjectRepository.update(project.id, { businessProfile: '' })
+    if (project.mssqlRunId !== undefined) updateSearchRunInSql(project.mssqlRunId, { businessProfile: '' }).catch(() => {})
+    setProject({ ...project, businessProfile: '' })
+    toast.success('Session ICP cleared — now using the global profile for validation')
+  }
+
   const STEP_LABEL: Record<'enrichment' | 'validation' | 'research', string> = {
     enrichment: 'enrichment', validation: 'validation', research: 'research queuing',
   }
@@ -290,6 +299,13 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
                     <button onClick={() => setShowFullProfile((v) => !v)} className="text-[11px] text-blue-400 hover:text-blue-300 font-medium">
                       {showFullProfile ? 'Show less' : 'Show full prompt'}
                     </button>
+                  )}
+                  {project?.businessProfile?.trim() && (
+                    <button
+                      onClick={clearToGlobalProfile}
+                      title="One-click fix if this session's ICP is stale — clears it so validation falls back to the current global profile"
+                      className="text-[11px] text-orange-400 hover:text-orange-300 font-medium"
+                    >Use global ICP</button>
                   )}
                   <button
                     onClick={() => { setProfileDraft(project?.businessProfile ?? ''); setEditingProfile(true) }}
