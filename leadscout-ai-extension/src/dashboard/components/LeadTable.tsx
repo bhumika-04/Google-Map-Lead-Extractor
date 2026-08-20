@@ -846,6 +846,11 @@ function LeadRow({ lead, selected, compact, visibleCols, showCrmButton, onToggle
         {!compact && <div className="text-gray-600 text-xs">{lead.city}</div>}
         {lead.validationStatus === 'relevant'     && <div className="text-green-500 text-xs mt-0.5">✓ Relevant</div>}
         {lead.validationStatus === 'not_relevant' && <div className="text-gray-600 text-xs mt-0.5">✕ Not relevant</div>}
+        {lead.icpReason && (
+          <div className="text-gray-600 text-xs mt-0.5 truncate max-w-[220px]" title={lead.icpReason}>
+            {lead.icpReason}
+          </div>
+        )}
         {lead.notes && <div className="text-yellow-700 text-xs mt-0.5 truncate max-w-[140px]" title={lead.notes}>✎ {lead.notes}</div>}
       </td>
       {col('icpScore') && (
