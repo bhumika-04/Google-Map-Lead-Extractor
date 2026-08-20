@@ -135,8 +135,25 @@ function parseJsonArray(text: string): ValidationResult[] {
 
     const relevant = icpScore >= 50 && r.relevant !== false
 
+    // Providers occasionally return leadId as a numeric STRING ("1234" instead
+    // of 1234) even though the prompt shows it as a bare number — the old
+    // strict `typeof === 'number'` check silently dropped those to 0, which
+    // meant every validation result for that batch got written to a
+    // nonexistent lead id 0 instead of the real lead. Real leads never got
+    // their validationStatus/icpScore updated even though the AI scored them
+    // correctly — the funnel's Relevant count stayed frozen while results kept
+    // coming back. Accept a numeric string too.
+    let leadId = 0
+    if (typeof r.leadId === 'number' && Number.isFinite(r.leadId)) {
+      leadId = r.leadId
+    } else if (typeof r.leadId === 'string' && r.leadId.trim() && !Number.isNaN(Number(r.leadId))) {
+      leadId = Number(r.leadId)
+    } else {
+      console.warn('[leadValidation] Could not parse leadId from AI response — result will be dropped:', r.leadId, r)
+    }
+
     return {
-      leadId:         typeof r.leadId === 'number' ? r.leadId : 0,
+      leadId,
       relevant,
       reason:         typeof r.reason === 'string' ? r.reason : '',
       confidence:     icpScore / 100,
