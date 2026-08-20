@@ -141,6 +141,13 @@ async function focusDashboardTab() {
 // page can show it and offer a Re-run button.
 const PIPELINE_KEEPALIVE = 'pipeline-keepalive'
 
+interface LeadValidationResult {
+  name: string
+  relevant: boolean
+  icpScore: number
+  reason: string
+}
+
 interface PipelineState {
   status: 'idle' | 'running' | 'stopped' | 'done'
   phase?: string
@@ -148,12 +155,29 @@ interface PipelineState {
   total: number
   projectId?: number   // which session this run is scoped to (undefined = all)
   updatedAt: number
+  // Live "why qualified / why rejected" feed for the validation step — newest
+  // first, capped so storage doesn't grow unbounded on a large session.
+  recentResults?: LeadValidationResult[]
+  relevantCount?: number
 }
+
+const MAX_RECENT_RESULTS = 50
 
 async function setPipelineState(patch: Partial<PipelineState>) {
   const cur: PipelineState = (await chrome.storage.local.get('pipeline_state')).pipeline_state
     ?? { status: 'idle', processed: 0, total: 0, updatedAt: 0 }
   await chrome.storage.local.set({ pipeline_state: { ...cur, ...patch, updatedAt: Date.now() } })
+}
+
+// Appends one lead's validation result to the live feed + relevant counter.
+// Read-modify-write against storage, called sequentially from the validation
+// loop (never concurrently), so no lock is needed.
+async function pushLeadResult(r: LeadValidationResult) {
+  const cur: PipelineState = (await chrome.storage.local.get('pipeline_state')).pipeline_state
+    ?? { status: 'idle', processed: 0, total: 0, updatedAt: 0 }
+  const recentResults = [r, ...(cur.recentResults ?? [])].slice(0, MAX_RECENT_RESULTS)
+  const relevantCount = (cur.relevantCount ?? 0) + (r.relevant ? 1 : 0)
+  await chrome.storage.local.set({ pipeline_state: { ...cur, recentResults, relevantCount, updatedAt: Date.now() } })
 }
 
 async function isPipelineStopRequested(): Promise<boolean> {
@@ -168,7 +192,7 @@ async function runPipeline(projectId?: number, force = false) {
 
   pipelineRunning = true
   await chrome.storage.local.set({ pipeline_stop: false })
-  await setPipelineState({ status: 'running', phase: 'starting', processed: 0, total: 0, projectId })
+  await setPipelineState({ status: 'running', phase: 'starting', processed: 0, total: 0, projectId, recentResults: [], relevantCount: 0 })
   chrome.alarms.create(PIPELINE_KEEPALIVE, { periodInMinutes: 0.4 }) // hold the worker up mid-run
 
   const lastSession = activeSession
@@ -183,10 +207,11 @@ async function runPipeline(projectId?: number, force = false) {
     })
   }
   const onProgress = (done: number, total: number) => { setPipelineState({ processed: done, total }).catch(() => {}) }
+  const onLeadResult = (r: LeadValidationResult) => pushLeadResult(r).catch(() => {})
   const shouldStop = () => isPipelineStopRequested()
 
   try {
-    await runAutoValidationAndResearch(settings, { onPhaseChange, onProgress, shouldStop, projectId, force })
+    await runAutoValidationAndResearch(settings, { onPhaseChange, onProgress, onLeadResult, shouldStop, projectId, force })
     await setPipelineState({ status: (await isPipelineStopRequested()) ? 'stopped' : 'done' })
   } catch (err) {
     console.error('[pipeline] failed:', err)
@@ -212,13 +237,14 @@ async function runPipelineStepBg(projectId: number | undefined, step: 'enrichmen
 
   pipelineRunning = true
   await chrome.storage.local.set({ pipeline_stop: false })
-  await setPipelineState({ status: 'running', phase: STEP_PHASE[step], processed: 0, total: 0, projectId })
+  await setPipelineState({ status: 'running', phase: STEP_PHASE[step], processed: 0, total: 0, projectId, recentResults: [], relevantCount: 0 })
   chrome.alarms.create(PIPELINE_KEEPALIVE, { periodInMinutes: 0.4 })
 
   try {
     await runPipelineStep(settings, {
       step, projectId, force,
       onProgress: (done, total) => { setPipelineState({ processed: done, total }).catch(() => {}) },
+      onLeadResult: (r) => pushLeadResult(r),
       shouldStop: () => isPipelineStopRequested(),
     })
     await setPipelineState({ status: (await isPipelineStopRequested()) ? 'stopped' : 'done' })

@@ -14,7 +14,7 @@ import { MSG } from '@/types/messages'
 import { COUNTRIES, flag } from './SearchConsole'
 import { timeAgo } from '@/utils/date'
 import LeadTable from './LeadTable'
-import PipelineControl from './PipelineControl'
+import PipelineControl, { ValidationFeed } from './PipelineControl'
 import type { SearchProject } from '@/types/searchProject'
 import type { Lead } from '@/types/lead'
 import type { SelectedLead, ResearchedLead } from '@/types/derivedLeads'
@@ -239,6 +239,9 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
             <span className="text-sm text-gray-400 font-medium">Pipeline</span>
             <PipelineControl projectId={projectId} />
           </div>
+          {/* Live per-lead validation feed — why each lead was selected/rejected,
+              as it happens. Only appears once a validation run has produced results. */}
+          <ValidationFeed projectId={projectId} />
           {/* Re-run a single step — independent of Continue / Re-run all above */}
           <div className="flex items-center gap-2 flex-wrap bg-gray-900 border border-gray-800 rounded-xl px-4 py-3">
             <span className="text-sm text-gray-400 font-medium">Re-run one step</span>

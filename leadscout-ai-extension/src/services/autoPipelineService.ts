@@ -32,6 +32,10 @@ async function resetScopeForRerun(projectId?: number): Promise<void> {
 
 type ValidationResult = Awaited<ReturnType<typeof validateLeads>>[number]
 
+// Per-lead callback so the UI can show a live "why qualified / why rejected"
+// feed while validation runs, instead of only a batch-level progress count.
+type LeadResultCallback = (r: { name: string; relevant: boolean; icpScore: number; reason: string }) => void | Promise<void>
+
 // Persist one batch of validation results immediately, so the workspace funnel
 // (Scored / Relevant) climbs live during a long validation run instead of
 // jumping only at the very end.
@@ -58,6 +62,7 @@ export async function runAutoValidationAndResearch(
     shouldStop?: () => boolean | Promise<boolean>
     projectId?: number   // scope to one session (undefined = all sessions)
     force?: boolean      // re-run: reprocess every lead in scope, not just 'new'
+    onLeadResult?: LeadResultCallback
   },
 ): Promise<void> {
   const onPhaseChange = opts?.onPhaseChange
@@ -65,6 +70,7 @@ export async function runAutoValidationAndResearch(
   const shouldStop = opts?.shouldStop ?? (async () => false)
   const projectId = opts?.projectId
   const force = opts?.force ?? false
+  const onLeadResult = opts?.onLeadResult
 
   const { provider, apiKey } = await resolveAiCredentials(settings)
   if (!apiKey.trim()) {
@@ -137,6 +143,10 @@ export async function runAutoValidationAndResearch(
         if (await shouldStop()) break
         const chunk = groupLeads.slice(i, i + CHUNK)
         const chunkResults = await validateLeads(chunk, profile, apiKey, provider, () => {})
+        for (const r of chunkResults) {
+          const name = chunk.find((c) => c.id === r.leadId)?.companyName ?? `lead ${r.leadId}`
+          await onLeadResult?.({ name, relevant: r.relevant, icpScore: r.icpScore, reason: r.reason })
+        }
         await persistValidationBatch(chunkResults)
         results = results.concat(chunkResults)
         onProgress?.(Math.min(i + CHUNK, groupLeads.length), groupLeads.length)
@@ -229,11 +239,13 @@ export async function runPipelineStep(
     projectId?: number
     force?: boolean
     onProgress?: (done: number, total: number) => void
+    onLeadResult?: LeadResultCallback
     shouldStop?: () => boolean | Promise<boolean>
   },
 ): Promise<{ processed: number; message: string }> {
   const { step, projectId, force = false } = opts
   const onProgress = opts.onProgress
+  const onLeadResult = opts.onLeadResult
   const shouldStop = opts.shouldStop ?? (async () => false)
 
   let scoped = await leadRepository.getAll()
@@ -305,6 +317,7 @@ export async function runPipelineStep(
       for (const r of chunkResults) {
         const name = chunk.find((c) => c.id === r.leadId)?.companyName ?? `lead ${r.leadId}`
         console.log(`[pipeline-step]   ${r.relevant ? '✓' : '✕'} ${name} — score ${r.icpScore} — ${r.reason}`)
+        await onLeadResult?.({ name, relevant: r.relevant, icpScore: r.icpScore, reason: r.reason })
       }
       console.log(`[pipeline-step] validation — batch done: ${chunkResults.length} scored, ${relevantInBatch} relevant`)
       await persistValidationBatch(chunkResults)
