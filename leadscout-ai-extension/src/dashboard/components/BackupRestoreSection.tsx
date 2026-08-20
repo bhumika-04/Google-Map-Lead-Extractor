@@ -3,7 +3,8 @@ import { db } from '@/db/db'
 import { toast } from '@/state/useToastStore'
 import { nowISO } from '@/utils/date'
 import { clearAllLocalData } from '@/services/backupSyncService'
-import { restoreFromSql, isApiAvailable } from '@/services/sqlSyncService'
+import { isApiAvailable } from '@/services/sqlSyncService'
+import { restoreFromNewSchema } from '@/services/restoreService'
 
 import { API_BASE as API, getApiBase, setApiBase, DEFAULT_API_BASE } from '@/config/api'
 
@@ -66,76 +67,23 @@ export default function BackupRestoreSection() {
   }
 
   // ── Sync from Database (MSSQL → IndexedDB) ─────────────────────────────────
+  // Non-destructive restore-down: pulls sessions + scraped/imported leads from
+  // the new schema and upserts them locally (by mssqlId) — merges, never wipes.
+  // Use it to bring an empty/second device up to date with the shared database.
   async function handleSyncFromDb() {
     setSyncing(true)
     try {
       const ok = await isApiAvailable()
       if (!ok) { toast.error(`Backend not reachable at ${API}`); return }
 
-      const data = await restoreFromSql()
-      if (!data) { toast.error('Could not fetch data from MSSQL'); return }
-
-      // The redesigned API's /api/restore returns { sessions, scrapedLeads,
-      // importedLeads } — no `companies`. The legacy rebuild below only understands
-      // the old shape, so on the new schema we must NOT fall through to the
-      // destructive "0 companies → wipe local data" path (that would delete
-      // everything even though MSSQL is full).
-      if (!Array.isArray((data as { companies?: unknown[] }).companies)) {
-        toast.info('Sync-from-Database is not available on the new schema — local data left unchanged.')
-        return
-      }
-
-      const companies = data.companies ?? []
-
-      if (companies.length === 0) {
-        // MSSQL is empty — this would wipe local data to match. Same destructive
-        // action as "Clear All Local Data" below, so it needs the same confirmation
-        // (previously this ran with zero warning — the cause of a real data-loss incident).
-        const localCount = await db.leads.count()
-        const ok = confirm(
-          `MSSQL returned 0 companies, but you have ${localCount} leads stored locally.\n\n` +
-          `Continuing will DELETE all ${localCount} local leads and research data to match the empty database.\n\n` +
-          `This cannot be undone. Continue?`
-        )
-        if (!ok) { toast.info('Sync cancelled — local data unchanged'); return }
-        await clearAllLocalData()
-        await refreshCounts()
-        toast.success('MSSQL is empty — local data cleared to match')
-        return
-      }
-
-      // Rebuild IndexedDB from MSSQL companies
-      // First clear existing leads so deleted records are removed too
-      await db.transaction('rw', [db.leads, db.searchSessions], async () => {
-        await db.leads.clear()
-        await db.searchSessions.clear()
-
-        for (const c of companies) {
-          await db.leads.add({
-            companyName:    c.companyName,
-            normalizedName: (c.companyName ?? '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 80),
-            address:        c.address,
-            phone:          c.phone,
-            website:        c.website,
-            googleMapsUrl:  c.googleMapsUrl,
-            rating:         c.rating,
-            reviewCount:    c.reviewCount,
-            category:       c.category,
-            city:           c.city ?? '',
-            keyword:        c.keyword ?? '',
-            searchQuery:    c.sessionName ?? '',
-            source:         'sql_restore',
-            status:         'new' as const,
-            confidence:     0.8,
-            capturedAt:     c.sessionCreatedAt ?? nowISO(),
-            updatedAt:      nowISO(),
-            sessionId:      0,
-          })
-        }
-      })
+      const res = await restoreFromNewSchema()
+      if (!res) { toast.error('Could not fetch data from the database'); return }
 
       await refreshCounts()
-      toast.success(`Synced ${companies.length} leads from MSSQL — reload the page to see them`)
+      toast.success(
+        `Synced ${res.sessions} session${res.sessions === 1 ? '' : 's'}, ` +
+        `${res.scraped} scraped + ${res.imported} imported leads — reload the page to see them`
+      )
     } catch (err: any) {
       toast.error(`Sync failed: ${err?.message}`)
     } finally {
