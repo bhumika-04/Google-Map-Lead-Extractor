@@ -239,15 +239,19 @@ export async function runPipelineStep(
   let scoped = await leadRepository.getAll()
   if (projectId !== undefined) scoped = scoped.filter((l) => (l.projectId ?? -1) === projectId)
 
+  console.log(`[pipeline-step] 🚀 ${step} — projectId=${projectId ?? 'all'} force=${force} scope=${scoped.length} leads`)
+
   if (step === 'enrichment') {
     const targets = force
       ? scoped
       : scoped.filter((l) => !l.teamSize && !l.annualTurnover && !l.industry && !l.decisionMaker)
     if (targets.length === 0) {
       const msg = 'No leads need enrichment'
+      console.log(`[pipeline-step] enrichment — ${msg}`)
       toast.info(msg)
       return { processed: 0, message: msg }
     }
+    console.log(`[pipeline-step] enrichment — ${targets.length} targets`)
     toast.info(`Re-enriching ${targets.length} leads…`)
     try {
       await runPreValidationEnrichment(targets, settings, '', onProgress, shouldStop)
@@ -256,6 +260,7 @@ export async function runPipelineStep(
     }
     reconcileScrapedForLeads(targets, 'enrichment').catch(() => {})
     const msg = `Enrichment done — ${targets.length} leads processed`
+    console.log(`[pipeline-step] ✅ ${msg}`)
     toast.success(msg)
     return { processed: targets.length, message: msg }
   }
@@ -264,6 +269,7 @@ export async function runPipelineStep(
     const { provider, apiKey } = await resolveAiCredentials(settings)
     if (!apiKey.trim()) {
       const msg = `Validation skipped — add a ${provider} API key to DeepLeadApi/appsettings.json and restart the backend`
+      console.warn(`[pipeline-step] validation — ${msg}`)
       toast.warning(msg)
       return { processed: 0, message: msg }
     }
@@ -272,6 +278,7 @@ export async function runPipelineStep(
       : scoped.filter((l) => l.status === 'new')
     if (targets.length === 0) {
       const msg = 'No leads to validate'
+      console.log(`[pipeline-step] validation — ${msg}`)
       toast.info(msg)
       return { processed: 0, message: msg }
     }
@@ -279,17 +286,22 @@ export async function runPipelineStep(
     const profile = (project?.businessProfile?.trim() || settings.businessProfile).trim()
     if (!profile) {
       const msg = 'Validation skipped — no business profile set (session or global)'
+      console.warn(`[pipeline-step] validation — ${msg}`)
       toast.warning(msg)
       return { processed: 0, message: msg }
     }
+    console.log(`[pipeline-step] validation — ${targets.length} targets, provider=${provider}, profile="${project?.businessProfile?.trim() ? project?.name : 'global'}" (${profile.length} chars)`)
     toast.info(`Re-validating ${targets.length} leads against the ICP…`)
 
     const CHUNK = 20
     let results: ValidationResult[] = []
     for (let i = 0; i < targets.length; i += CHUNK) {
-      if (await shouldStop()) break
+      if (await shouldStop()) { console.log('[pipeline-step] validation — stop requested'); break }
       const chunk = targets.slice(i, i + CHUNK)
+      console.log(`[pipeline-step] validation — batch ${Math.floor(i / CHUNK) + 1}: leads ${i + 1}-${Math.min(i + CHUNK, targets.length)} of ${targets.length}`)
       const chunkResults = await validateLeads(chunk, profile, apiKey, provider, () => {})
+      const relevantInBatch = chunkResults.filter((r) => r.relevant).length
+      console.log(`[pipeline-step] validation — batch done: ${chunkResults.length} scored, ${relevantInBatch} relevant`)
       await persistValidationBatch(chunkResults)
       results = results.concat(chunkResults)
       onProgress?.(Math.min(i + CHUNK, targets.length), targets.length)
@@ -318,6 +330,7 @@ export async function runPipelineStep(
 
     const relevantCount = results.filter((r) => r.relevant).length
     const msg = `Validation done — ${results.length} scored, ${relevantCount} relevant`
+    console.log(`[pipeline-step] ✅ ${msg}`)
     toast.success(msg)
     return { processed: results.length, message: msg }
   }
@@ -328,9 +341,11 @@ export async function runPipelineStep(
     : scoped.filter((l) => (l.validationStatus === 'relevant' || l.status === 'selected') && !l.status.startsWith('research'))
   if (targets.length === 0) {
     const msg = 'No relevant leads to queue for research'
+    console.log(`[pipeline-step] research — ${msg}`)
     toast.info(msg)
     return { processed: 0, message: msg }
   }
+  console.log(`[pipeline-step] research — ${targets.length} targets`)
   if (force) {
     const ids = targets.map((l) => l.id!).filter((x): x is number => !!x)
     await db.researchResults.where('leadId').anyOf(ids).and((r) => r.jobId === 0).delete().catch(() => {})
@@ -344,6 +359,7 @@ export async function runPipelineStep(
   }
   if (queued > 0) chrome.runtime.sendMessage({ type: MSG.TRIGGER_RESEARCH }).catch(() => {})
   const msg = `${queued} leads queued for research`
+  console.log(`[pipeline-step] ✅ ${msg}`)
   toast.success(msg)
   return { processed: queued, message: msg }
 }
