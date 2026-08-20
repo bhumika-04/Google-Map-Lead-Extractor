@@ -290,7 +290,8 @@ export async function runPipelineStep(
       toast.warning(msg)
       return { processed: 0, message: msg }
     }
-    console.log(`[pipeline-step] validation — ${targets.length} targets, provider=${provider}, profile="${project?.businessProfile?.trim() ? project?.name : 'global'}" (${profile.length} chars)`)
+    const usingSessionProfile = !!project?.businessProfile?.trim()
+    console.log(`[pipeline-step] validation — ${targets.length} targets, provider=${provider}, source=${usingSessionProfile ? `session "${project!.name}"` : 'global (appsettings.json)'}, profile (${profile.length} chars): ${profile.slice(0, 300)}${profile.length > 300 ? '…' : ''}`)
     toast.info(`Re-validating ${targets.length} leads against the ICP…`)
 
     const CHUNK = 20
@@ -301,6 +302,10 @@ export async function runPipelineStep(
       console.log(`[pipeline-step] validation — batch ${Math.floor(i / CHUNK) + 1}: leads ${i + 1}-${Math.min(i + CHUNK, targets.length)} of ${targets.length}`)
       const chunkResults = await validateLeads(chunk, profile, apiKey, provider, () => {})
       const relevantInBatch = chunkResults.filter((r) => r.relevant).length
+      for (const r of chunkResults) {
+        const name = chunk.find((c) => c.id === r.leadId)?.companyName ?? `lead ${r.leadId}`
+        console.log(`[pipeline-step]   ${r.relevant ? '✓' : '✕'} ${name} — score ${r.icpScore} — ${r.reason}`)
+      }
       console.log(`[pipeline-step] validation — batch done: ${chunkResults.length} scored, ${relevantInBatch} relevant`)
       await persistValidationBatch(chunkResults)
       results = results.concat(chunkResults)
