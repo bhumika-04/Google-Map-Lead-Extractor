@@ -30,6 +30,7 @@ import { sessionRepository } from '@/db/sessionRepository'
 import { scrapedLeadRepo } from '@/db/pipelineLeadRepository'
 import { createSessionInSql, saveLeadBatchToSql as savePipelineBatchToSql } from '@/services/pipelineSyncService'
 import { verifyLeadsFromGoogle } from '@/services/googleVerifyService'
+import { qualifyImportedLeads } from '@/services/importedQualifyService'
 import { reconcileScrapedForLeads } from '@/services/scrapedReconcileService'
 import type { ScrapedLead } from '@/types/pipelineLead'
 import type { SessionRecord } from '@/types/session'
@@ -200,6 +201,31 @@ async function maybeRunAutoPipeline() {
   const settings = await loadSettingsForResearch()
   if (!settings.autoValidate) return
   runPipeline().catch(() => {})
+}
+
+// Qualify imported leads (validation/ICP scoring for the imported_leads side).
+async function runQualifyImported(sessionId?: number, force = false) {
+  if (pipelineRunning) return
+  pipelineRunning = true
+  await chrome.storage.local.set({ pipeline_stop: false })
+  chrome.alarms.create(PIPELINE_KEEPALIVE, { periodInMinutes: 0.4 })
+  try {
+    const settings = await loadSettingsForResearch()
+    await setPipelineState({ status: 'running', phase: 'qualifying', processed: 0, total: 0 })
+    const updated = await qualifyImportedLeads(settings, {
+      sessionId, force,
+      onProgress: (done, total) => { setPipelineState({ processed: done, total }).catch(() => {}) },
+      shouldStop: () => isPipelineStopRequested(),
+    })
+    await setPipelineState({ status: (await isPipelineStopRequested()) ? 'stopped' : 'done' })
+    await log('system', `Qualify imported leads: ${updated} scored`).catch(() => {})
+  } catch (err) {
+    console.error('[qualify-imported] failed:', err)
+    await setPipelineState({ status: 'stopped' })
+  } finally {
+    pipelineRunning = false
+    chrome.alarms.clear(PIPELINE_KEEPALIVE).catch(() => {})
+  }
 }
 
 // On-demand "Verify from Google" — replaces estimated turnover/team size with
@@ -1538,6 +1564,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const { projectId } = (msg.payload ?? {}) as { projectId?: number }
     chrome.storage.local.set({ pipeline_stop: false })
       .then(() => runVerifyFromGoogle(projectId))
+      .catch(() => {})
+    sendResponse({ ok: true })
+    return true
+  }
+
+  if (type === MSG.QUALIFY_IMPORTED) {
+    const { sessionId, force } = (msg.payload ?? {}) as { sessionId?: number; force?: boolean }
+    chrome.storage.local.set({ pipeline_stop: false })
+      .then(() => runQualifyImported(sessionId, force))
       .catch(() => {})
     sendResponse({ ok: true })
     return true

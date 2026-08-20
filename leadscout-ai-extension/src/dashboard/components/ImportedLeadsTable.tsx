@@ -3,6 +3,8 @@ import { importedLeadRepo } from '@/db/pipelineLeadRepository'
 import { sessionRepository } from '@/db/sessionRepository'
 import { saveStatusToSql } from '@/services/pipelineSyncService'
 import { toast } from '@/state/useToastStore'
+import { MSG } from '@/types/messages'
+import PipelineControl from './PipelineControl'
 import type { ImportedLead } from '@/types/pipelineLead'
 import type { SessionRecord } from '@/types/session'
 
@@ -65,6 +67,12 @@ export default function ImportedLeadsTable({ mode }: { mode: Mode }) {
     load()
   }
 
+  async function qualify() {
+    const sessionId = sessionFilter === 'all' ? undefined : sessionFilter
+    await chrome.runtime.sendMessage({ type: MSG.QUALIFY_IMPORTED, payload: { sessionId } }).catch(() => {})
+    toast.info('Qualifying imported leads against the ICP…')
+  }
+
   async function remove(l: ImportedLead) {
     if (!l.id || !confirm(`Delete "${l.companyName}"?`)) return
     await importedLeadRepo.delete(l.id)
@@ -76,6 +84,12 @@ export default function ImportedLeadsTable({ mode }: { mode: Mode }) {
       <div className="flex items-center gap-2 flex-wrap">
         <h2 className="text-sm font-semibold text-white">{MODE_TITLE[mode]}</h2>
         <span className="text-xs text-gray-600">{filtered.length} leads</span>
+        <PipelineControl />
+        <button
+          onClick={qualify}
+          className="text-xs px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-medium transition-colors"
+          title="Score imported leads against your ICP (marks them relevant/not-relevant with a reason)"
+        >Qualify leads</button>
         <span className="flex-1" />
         <input
           value={q}
@@ -118,9 +132,16 @@ export default function ImportedLeadsTable({ mode }: { mode: Mode }) {
             <tbody>
               {filtered.map((l) => (
                 <tr key={l.id} className="border-t border-gray-800/60 hover:bg-gray-800/40 transition-colors">
-                  <td className="px-3 py-2 text-white font-medium">{l.companyName}</td>
+                  <td className="px-3 py-2 text-white font-medium">
+                    {l.companyName}
+                    {l.icpReason && (
+                      <div className="text-[11px] text-gray-500 font-normal truncate max-w-[300px]" title={l.icpReason}>
+                        {l.validationStatus === 'relevant' ? '✓ ' : l.validationStatus === 'not_relevant' ? '✕ ' : ''}{l.icpReason}
+                      </div>
+                    )}
+                  </td>
                   <td className="px-3 py-2">{l.icpScore != null
-                    ? <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${ICP_CLS(l.icpScore)}`}>{l.icpScore}</span>
+                    ? <span title={l.icpReason} className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${ICP_CLS(l.icpScore)}`}>{l.icpScore}</span>
                     : <span className="text-gray-700">—</span>}</td>
                   <td className="px-3 py-2 text-gray-400">{l.category ?? '—'}</td>
                   <td className="px-3 py-2 text-gray-400">{l.city ?? '—'}</td>

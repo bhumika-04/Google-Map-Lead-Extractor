@@ -27,6 +27,7 @@ export const MSG = {
   PIPELINE_RUN:      'PIPELINE_RUN',   // (re)run enrichment + validation + research
   PIPELINE_STOP:     'PIPELINE_STOP',  // stop the running pipeline
   VERIFY_FROM_GOOGLE:'VERIFY_FROM_GOOGLE', // fetch exact turnover/team size from Google AI mode
+  QUALIFY_IMPORTED:  'QUALIFY_IMPORTED',   // validate/score imported leads against the ICP
   BACKGROUND_DISCOVER: 'BACKGROUND_DISCOVER',
   DISCOVER_STATUS:   'DISCOVER_STATUS',
 
