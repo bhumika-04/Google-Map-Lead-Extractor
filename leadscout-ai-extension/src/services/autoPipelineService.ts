@@ -216,3 +216,134 @@ export async function runAutoValidationAndResearch(
   // ── Step 4: Auto-start research queue — no user click needed ─────────────
   chrome.runtime.sendMessage({ type: MSG.TRIGGER_RESEARCH }).catch(() => {})
 }
+
+// Re-run a SINGLE pipeline step for a session, independent of the other steps —
+// e.g. re-enrich without re-validating, or re-score against an edited ICP
+// without re-running enrichment/research. `force` reprocesses every matching
+// lead regardless of its current status; without it, only leads that haven't
+// been through that step yet are touched.
+export async function runPipelineStep(
+  settings: AppSettings,
+  opts: {
+    step: 'enrichment' | 'validation' | 'research'
+    projectId?: number
+    force?: boolean
+    onProgress?: (done: number, total: number) => void
+    shouldStop?: () => boolean | Promise<boolean>
+  },
+): Promise<{ processed: number; message: string }> {
+  const { step, projectId, force = false } = opts
+  const onProgress = opts.onProgress
+  const shouldStop = opts.shouldStop ?? (async () => false)
+
+  let scoped = await leadRepository.getAll()
+  if (projectId !== undefined) scoped = scoped.filter((l) => (l.projectId ?? -1) === projectId)
+
+  if (step === 'enrichment') {
+    const targets = force
+      ? scoped
+      : scoped.filter((l) => !l.teamSize && !l.annualTurnover && !l.industry && !l.decisionMaker)
+    if (targets.length === 0) {
+      const msg = 'No leads need enrichment'
+      toast.info(msg)
+      return { processed: 0, message: msg }
+    }
+    toast.info(`Re-enriching ${targets.length} leads…`)
+    try {
+      await runPreValidationEnrichment(targets, settings, '', onProgress, shouldStop)
+    } catch (err) {
+      console.warn('[pipeline-step] Enrichment error (non-fatal):', err)
+    }
+    reconcileScrapedForLeads(targets, 'enrichment').catch(() => {})
+    const msg = `Enrichment done — ${targets.length} leads processed`
+    toast.success(msg)
+    return { processed: targets.length, message: msg }
+  }
+
+  if (step === 'validation') {
+    const { provider, apiKey } = await resolveAiCredentials(settings)
+    if (!apiKey.trim()) {
+      const msg = `Validation skipped — add a ${provider} API key to DeepLeadApi/appsettings.json and restart the backend`
+      toast.warning(msg)
+      return { processed: 0, message: msg }
+    }
+    const targets = force
+      ? scoped.filter((l) => !l.status.startsWith('research'))
+      : scoped.filter((l) => l.status === 'new')
+    if (targets.length === 0) {
+      const msg = 'No leads to validate'
+      toast.info(msg)
+      return { processed: 0, message: msg }
+    }
+    const project = projectId !== undefined ? await searchProjectRepository.getById(projectId) : undefined
+    const profile = (project?.businessProfile?.trim() || settings.businessProfile).trim()
+    if (!profile) {
+      const msg = 'Validation skipped — no business profile set (session or global)'
+      toast.warning(msg)
+      return { processed: 0, message: msg }
+    }
+    toast.info(`Re-validating ${targets.length} leads against the ICP…`)
+
+    const CHUNK = 20
+    let results: ValidationResult[] = []
+    for (let i = 0; i < targets.length; i += CHUNK) {
+      if (await shouldStop()) break
+      const chunk = targets.slice(i, i + CHUNK)
+      const chunkResults = await validateLeads(chunk, profile, apiKey, provider, () => {})
+      await persistValidationBatch(chunkResults)
+      results = results.concat(chunkResults)
+      onProgress?.(Math.min(i + CHUNK, targets.length), targets.length)
+    }
+    if (results.length === 0) return { processed: 0, message: 'Validation stopped before any results' }
+
+    reconcileScrapedForLeads(targets, 'validation').catch(() => {})
+
+    const allTouched = await Promise.all(results.map((r) => leadRepository.getById(r.leadId)))
+    const relevantIdSet = new Set(results.filter((r) => r.relevant).map((r) => r.leadId))
+    saveValidationBulkToSql(
+      allTouched
+        .filter((l): l is NonNullable<typeof l> => !!l?.mssqlId)
+        .map((l) => ({ mssqlId: l.mssqlId!, status: relevantIdSet.has(l.id!) ? 'selected' as const : 'not_relevant' as const }))
+    ).catch(() => {})
+    saveIcpBulkToSql(
+      allTouched
+        .filter((l): l is NonNullable<typeof l> => !!l?.mssqlId && l.icpScore !== undefined)
+        .map((l) => ({
+          mssqlId: l.mssqlId!, icpScore: l.icpScore!, icpStatus: l.icpStatus ?? 'hold',
+          icpReason: l.icpReason ?? '', icpScoreBreakdown: l.icpScoreBreakdown,
+          teamSize: l.teamSize, annualTurnover: l.annualTurnover,
+          industry: l.industry, companyType: l.companyType, decisionMaker: l.decisionMaker,
+        }))
+    ).catch(() => {})
+
+    const relevantCount = results.filter((r) => r.relevant).length
+    const msg = `Validation done — ${results.length} scored, ${relevantCount} relevant`
+    toast.success(msg)
+    return { processed: results.length, message: msg }
+  }
+
+  // step === 'research'
+  const targets = force
+    ? scoped.filter((l) => l.validationStatus === 'relevant' || l.status === 'selected' || l.status.startsWith('research'))
+    : scoped.filter((l) => (l.validationStatus === 'relevant' || l.status === 'selected') && !l.status.startsWith('research'))
+  if (targets.length === 0) {
+    const msg = 'No relevant leads to queue for research'
+    toast.info(msg)
+    return { processed: 0, message: msg }
+  }
+  if (force) {
+    const ids = targets.map((l) => l.id!).filter((x): x is number => !!x)
+    await db.researchResults.where('leadId').anyOf(ids).and((r) => r.jobId === 0).delete().catch(() => {})
+    await leadRepository.updateMany(ids, { status: 'selected' })
+  }
+  let queued = 0
+  for (const l of targets) {
+    if (await shouldStop()) break
+    try { await addToResearchQueue(l); queued++ } catch { /* already queued */ }
+    onProgress?.(queued, targets.length)
+  }
+  if (queued > 0) chrome.runtime.sendMessage({ type: MSG.TRIGGER_RESEARCH }).catch(() => {})
+  const msg = `${queued} leads queued for research`
+  toast.success(msg)
+  return { processed: queued, message: msg }
+}

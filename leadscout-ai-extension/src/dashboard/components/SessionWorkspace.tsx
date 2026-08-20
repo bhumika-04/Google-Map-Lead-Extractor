@@ -7,6 +7,7 @@ import { scrapedLeadRepo } from '@/db/pipelineLeadRepository'
 import type { ScrapedLead } from '@/types/pipelineLead'
 import { addToResearchQueue } from '@/services/futureResearchService'
 import { syncDerivedLeads } from '@/services/derivedLeadsService'
+import { updateSearchRunInSql } from '@/services/sqlSyncService'
 import { useLeadStore } from '@/state/useLeadStore'
 import { toast } from '@/state/useToastStore'
 import { MSG } from '@/types/messages'
@@ -50,7 +51,7 @@ function computeScrapedStats(rows: ScrapedLead[]) {
 
 // Map a scraped_leads row into the shapes the workspace tables already render.
 function toSelectedRow(r: ScrapedLead): SelectedLead {
-  return { leadId: r.id!, projectId: r.sessionId, companyName: r.companyName, icpScore: r.icpScore, category: r.category, phone: r.phone, city: r.city, selectedAt: r.updatedAt } as SelectedLead
+  return { leadId: r.id!, projectId: r.sessionId, companyName: r.companyName, icpScore: r.icpScore, category: r.category, phone: r.phone, city: r.city, selectedAt: r.updatedAt, validationReason: r.icpReason } as SelectedLead
 }
 function toResearchedRow(r: ScrapedLead): ResearchedLead {
   return { leadId: r.id!, projectId: r.sessionId, companyName: r.companyName, decisionMaker: r.decisionMaker, email: r.email, industry: r.industry, annualTurnover: r.annualTurnover, teamSize: r.teamSize, researchedAt: r.researchedAt ?? r.updatedAt } as ResearchedLead
@@ -65,6 +66,9 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
   const [selRows, setSelRows] = useState<SelectedLead[]>([])
   const [resRows, setResRows] = useState<ResearchedLead[]>([])
   const [scraped, setScraped] = useState<ScrapedLead[]>([])
+  const [editingProfile, setEditingProfile] = useState(false)
+  const [profileDraft, setProfileDraft] = useState('')
+  const [showFullProfile, setShowFullProfile] = useState(false)
 
   // Scope every lead view to this session while the workspace is open.
   useEffect(() => {
@@ -121,6 +125,25 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
   function exit() {
     setProjectScope(null)   // leaving the workspace un-scopes the global lead views
     onExit()
+  }
+
+  async function saveProfile() {
+    if (!project?.id) return
+    const value = profileDraft.trim()
+    await searchProjectRepository.update(project.id, { businessProfile: value })
+    if (project.mssqlRunId !== undefined) updateSearchRunInSql(project.mssqlRunId, { businessProfile: value }).catch(() => {})
+    setProject({ ...project, businessProfile: value })
+    setEditingProfile(false)
+    toast.success('Session ICP updated — used for this session’s next validation & research')
+  }
+
+  const STEP_LABEL: Record<'enrichment' | 'validation' | 'research', string> = {
+    enrichment: 'enrichment', validation: 'validation', research: 'research queuing',
+  }
+  async function runStep(step: 'enrichment' | 'validation' | 'research') {
+    if (!confirm(`Re-run ${STEP_LABEL[step]} for this session? Leads already past this step will be reprocessed.`)) return
+    await chrome.runtime.sendMessage({ type: MSG.PIPELINE_RUN_STEP, payload: { projectId, step, force: true } }).catch(() => {})
+    toast.info(`Re-running ${STEP_LABEL[step]}…`)
   }
 
   async function queueRelevantForResearch() {
@@ -216,6 +239,25 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
             <span className="text-sm text-gray-400 font-medium">Pipeline</span>
             <PipelineControl projectId={projectId} />
           </div>
+          {/* Re-run a single step — independent of Continue / Re-run all above */}
+          <div className="flex items-center gap-2 flex-wrap bg-gray-900 border border-gray-800 rounded-xl px-4 py-3">
+            <span className="text-sm text-gray-400 font-medium">Re-run one step</span>
+            <button
+              onClick={() => runStep('enrichment')}
+              className="text-xs px-3 py-1.5 rounded-lg bg-sky-900/40 hover:bg-sky-900/70 text-sky-300 border border-sky-800/50 font-medium transition-colors"
+              title="Re-run AI enrichment only for this session's leads"
+            >Enrichment</button>
+            <button
+              onClick={() => runStep('validation')}
+              className="text-xs px-3 py-1.5 rounded-lg bg-indigo-900/40 hover:bg-indigo-900/70 text-indigo-300 border border-indigo-800/50 font-medium transition-colors"
+              title="Re-score this session's leads against the ICP below only — no re-enrichment"
+            >Validation</button>
+            <button
+              onClick={() => runStep('research')}
+              className="text-xs px-3 py-1.5 rounded-lg bg-violet-900/40 hover:bg-violet-900/70 text-violet-300 border border-violet-800/50 font-medium transition-colors"
+              title="Re-queue relevant leads for deep research only"
+            >Research</button>
+          </div>
           <div className="flex items-center gap-2.5 flex-wrap">
             <button onClick={() => setTab('leads')} className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors">View all leads</button>
             <button onClick={() => setTab('selected')} className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors">View selected</button>
@@ -236,12 +278,43 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
               title="Fetch exact turnover & team size from Google AI mode (replaces estimates). Slow — one search per lead."
             >Verify from Google</button>
           </div>
-          {project?.businessProfile?.trim() && (
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-              <div className="text-xs text-gray-500 font-medium mb-1">Session ICP / business profile</div>
-              <p className="text-xs text-gray-300 leading-relaxed whitespace-pre-wrap line-clamp-4">{project.businessProfile}</p>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="text-xs text-gray-500 font-medium">Session ICP / business profile</div>
+              {!editingProfile && (
+                <div className="flex items-center gap-3">
+                  {(project?.businessProfile?.length ?? 0) > 260 && (
+                    <button onClick={() => setShowFullProfile((v) => !v)} className="text-[11px] text-blue-400 hover:text-blue-300 font-medium">
+                      {showFullProfile ? 'Show less' : 'Show full prompt'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { setProfileDraft(project?.businessProfile ?? ''); setEditingProfile(true) }}
+                    className="text-[11px] text-purple-400 hover:text-purple-300 font-medium"
+                  >Edit</button>
+                </div>
+              )}
             </div>
-          )}
+            {editingProfile ? (
+              <div className="space-y-2">
+                <textarea
+                  autoFocus
+                  value={profileDraft}
+                  onChange={(e) => setProfileDraft(e.target.value)}
+                  rows={14}
+                  className="w-full bg-gray-950 border border-gray-700 text-gray-200 text-xs px-3 py-2.5 rounded-lg leading-relaxed font-mono focus:outline-none focus:border-purple-600"
+                />
+                <div className="flex gap-2">
+                  <button onClick={saveProfile} className="text-xs px-3 py-1.5 bg-purple-700 hover:bg-purple-600 text-white rounded-lg font-medium">Save ICP</button>
+                  <button onClick={() => setEditingProfile(false)} className="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-lg">Cancel</button>
+                </div>
+              </div>
+            ) : project?.businessProfile?.trim() ? (
+              <p className={`text-xs text-gray-300 leading-relaxed whitespace-pre-wrap ${showFullProfile ? '' : 'line-clamp-4'}`}>{project.businessProfile}</p>
+            ) : (
+              <p className="text-xs text-gray-600 italic">No ICP set for this session — falling back to the global profile. Click Edit to set one just for this session.</p>
+            )}
+          </div>
         </div>
       )}
       {/* Leads tab keeps the full-featured LeadTable (same mirrored data, but with
@@ -292,7 +365,14 @@ function SelectedTable({ rows }: { rows: SelectedLead[] }) {
         <tbody>
           {rows.map((r) => (
             <tr key={r.leadId} className="border-t border-gray-800/60 hover:bg-gray-800/40 transition-colors">
-              <td className="px-3 py-2 text-white font-medium">{r.companyName}</td>
+              <td className="px-3 py-2 text-white font-medium">
+                {r.companyName}
+                {r.validationReason && (
+                  <div className="text-[11px] text-gray-500 font-normal truncate max-w-[320px]" title={r.validationReason}>
+                    ✓ {r.validationReason}
+                  </div>
+                )}
+              </td>
               <td className="px-3 py-2">{r.icpScore != null ? <IcpBadge score={r.icpScore} /> : <span className="text-gray-700">—</span>}</td>
               <td className="px-3 py-2 text-gray-400">{r.category ?? '—'}</td>
               <td className="px-3 py-2 text-gray-300">{r.phone ?? '—'}</td>

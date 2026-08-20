@@ -23,7 +23,7 @@ import { addToResearchQueue } from '@/services/futureResearchService'
 import { discoverLeads } from '@/services/directoryDiscovery'
 import { syncToSql, isApiAvailable, fetchApiConfig, restoreFromSql, saveLeadBatchToSql, saveValidationBulkToSql, createSearchRunInSql, updateSearchRunInSql, fetchSearchRuns } from '@/services/sqlSyncService'
 import { pushBackup } from '@/services/backupSyncService'
-import { runAutoValidationAndResearch } from '@/services/autoPipelineService'
+import { runAutoValidationAndResearch, runPipelineStep } from '@/services/autoPipelineService'
 // Dual-write to the redesigned schema (sessions + scrapedLeads) — mirrors capture
 // into the new tables without disturbing the proven legacy capture path.
 import { sessionRepository } from '@/db/sessionRepository'
@@ -190,6 +190,40 @@ async function runPipeline(projectId?: number, force = false) {
     await setPipelineState({ status: (await isPipelineStopRequested()) ? 'stopped' : 'done' })
   } catch (err) {
     console.error('[pipeline] failed:', err)
+    await setPipelineState({ status: 'stopped' })
+  } finally {
+    pipelineRunning = false
+    chrome.alarms.clear(PIPELINE_KEEPALIVE).catch(() => {})
+  }
+}
+
+// Re-run ONE pipeline step (enrichment/validation/research) for a session —
+// used by the per-workspace "re-run this step" buttons, independent of the
+// full Continue/Re-run-all flow above.
+const STEP_PHASE: Record<'enrichment' | 'validation' | 'research', string> = {
+  enrichment: 'quick_enrichment_running',
+  validation: 'validation_running',
+  research: 'research_queued',
+}
+
+async function runPipelineStepBg(projectId: number | undefined, step: 'enrichment' | 'validation' | 'research', force = false) {
+  if (pipelineRunning) return
+  const settings = await loadSettingsForResearch()
+
+  pipelineRunning = true
+  await chrome.storage.local.set({ pipeline_stop: false })
+  await setPipelineState({ status: 'running', phase: STEP_PHASE[step], processed: 0, total: 0, projectId })
+  chrome.alarms.create(PIPELINE_KEEPALIVE, { periodInMinutes: 0.4 })
+
+  try {
+    await runPipelineStep(settings, {
+      step, projectId, force,
+      onProgress: (done, total) => { setPipelineState({ processed: done, total }).catch(() => {}) },
+      shouldStop: () => isPipelineStopRequested(),
+    })
+    await setPipelineState({ status: (await isPipelineStopRequested()) ? 'stopped' : 'done' })
+  } catch (err) {
+    console.error('[pipeline-step] failed:', err)
     await setPipelineState({ status: 'stopped' })
   } finally {
     pipelineRunning = false
@@ -1547,6 +1581,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const { projectId, force } = (msg.payload ?? {}) as { projectId?: number; force?: boolean }
     chrome.storage.local.set({ pipeline_stop: false })
       .then(() => runPipeline(projectId, force))
+      .catch(() => {})
+    sendResponse({ ok: true })
+    return true
+  }
+
+  if (type === MSG.PIPELINE_RUN_STEP) {
+    const { projectId, step, force } = (msg.payload ?? {}) as { projectId?: number; step: 'enrichment' | 'validation' | 'research'; force?: boolean }
+    chrome.storage.local.set({ pipeline_stop: false })
+      .then(() => runPipelineStepBg(projectId, step, force))
       .catch(() => {})
     sendResponse({ ok: true })
     return true

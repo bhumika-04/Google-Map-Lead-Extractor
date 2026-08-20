@@ -320,6 +320,16 @@ function extractCardData(card: Element): RawBusinessCard | null {
   return { companyName, category, rating, reviewCount, address, phone, website, googleMapsUrl, rawText }
 }
 
+// Shared heading reader for whatever detail panel/place page is currently
+// open — used both to tell when a clicked-into card has finished rendering
+// and to build a single-business capture from a /maps/place/ page.
+export function getDetailHeading(): string {
+  return document.querySelector('h1.DUwDvf')?.textContent?.trim()
+    ?? document.querySelector('[role="main"] h1')?.textContent?.trim()
+    ?? document.querySelector('div[aria-label][role="main"]')?.getAttribute('aria-label')?.trim()
+    ?? ''
+}
+
 export function extractResultPanel(): Element | null {
   for (const sel of SELECTORS.resultPanel) {
     const el = document.querySelector(sel)
@@ -395,10 +405,7 @@ export function extractDetailPanelData(): Partial<RawBusinessCard> {
 // shape and silently end the session with nothing, wasting the whole attempt
 // even though the one exact match is sitting right there on screen.
 export function extractSingleBusinessFromPlacePage(): RawBusinessCard | null {
-  const heading =
-    document.querySelector('h1.DUwDvf')?.textContent?.trim() ??
-    document.querySelector('[role="main"] h1')?.textContent?.trim() ??
-    document.querySelector('div[aria-label][role="main"]')?.getAttribute('aria-label')?.trim()
+  const heading = getDetailHeading()
   if (!heading) return null
 
   const detail = extractDetailPanelData()

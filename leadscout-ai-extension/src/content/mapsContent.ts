@@ -10,7 +10,7 @@ const MSG = {
   GET_STATUS:         'GET_STATUS',
   CONTENT_READY:      'CONTENT_READY',
 } as const
-import { extractVisibleCards, buildLead, extractResultPanel, extractDetailPanelData, extractSingleBusinessFromPlacePage } from './mapsExtractor'
+import { extractVisibleCards, buildLead, extractResultPanel, extractDetailPanelData, extractSingleBusinessFromPlacePage, getDetailHeading, type RawBusinessCard } from './mapsExtractor'
 import { AutoScroller } from './autoScroller'
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -21,6 +21,12 @@ let maxResults = 100
 let capturedUrls = new Set<string>()
 let totalSent = 0
 let scroller: AutoScroller | null = null
+// Re-entrancy guard — captureVisible() now clicks into cards to read their
+// detail panel, which takes seconds. AutoScroller keeps ticking on its own
+// timer regardless, so a second tick can fire before the first sweep (still
+// mid click-through) has returned; without this guard the two would fight
+// over navigating the same Maps panel.
+let visiting = false
 
 let captureSettings = {
   autoScrollDelay: 2000,
@@ -34,20 +40,80 @@ function normalize(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Compares normalized name prefixes to handle truncation in either direction.
+function namesMatch(a: string, b: string): boolean {
+  if (!a || !b) return false
+  const nA = normalize(a)
+  const nB = normalize(b)
+  const minLen = Math.min(nA.length, nB.length, 20)
+  if (minLen === 0) return false
+  return nA.slice(0, minLen) === nB.slice(0, minLen)
+}
+
 // Returns true if the open detail panel is likely showing this company.
-// We compare normalized name prefixes to handle truncation in either direction.
 function isDetailPanelMatch(cardName: string, panel: ReturnType<typeof extractDetailPanelData>): boolean {
   if (!panel || (!panel.phone && !panel.website)) return false
-  // Get the panel title from the page heading
-  const heading =
-    document.querySelector('h1.DUwDvf')?.textContent?.trim() ??
-    document.querySelector('[role="main"] h1')?.textContent?.trim() ??
-    document.querySelector('div[aria-label][role="main"]')?.getAttribute('aria-label')?.trim() ?? ''
+  const heading = getDetailHeading()
   if (!heading) return true // no heading — assume match, merge anyway
-  const nCard = normalize(cardName)
-  const nPanel = normalize(heading)
-  const minLen = Math.min(nCard.length, nPanel.length, 20)
-  return nCard.slice(0, minLen) === nPanel.slice(0, minLen)
+  return namesMatch(cardName, heading)
+}
+
+// Re-finds a card's clickable link in the CURRENT list DOM. List cards get
+// rebuilt whenever Maps swaps the panel between list and detail view, so a
+// reference captured before a previous click-through visit is stale by the
+// time we're ready for the next card.
+function findCardLink(googleMapsUrl: string | undefined, companyName: string): HTMLAnchorElement | null {
+  const panel = extractResultPanel()
+  if (!panel) return null
+  const links = Array.from(panel.querySelectorAll('a.hfpxzc, a[href*="/maps/place/"]')) as HTMLAnchorElement[]
+  if (googleMapsUrl) {
+    const exact = links.find((a) => a.href.split('?')[0] === googleMapsUrl)
+    if (exact) return exact
+  }
+  return links.find((a) => namesMatch(a.getAttribute('aria-label') ?? '', companyName)) ?? null
+}
+
+// Click into a card's detail panel to read phone/website/full address — none
+// of these reliably render on the collapsed list card itself, only on the
+// detail panel Maps shows after opening a listing. Mutates `raw` in place,
+// then returns to the results list before resolving.
+async function visitCardDetails(raw: RawBusinessCard): Promise<void> {
+  const link = findCardLink(raw.googleMapsUrl, raw.companyName)
+  if (!link) return
+  link.click()
+
+  const matchStart = Date.now()
+  let matched = false
+  while (Date.now() - matchStart < 3500) {
+    if (!captureActive) break
+    if (namesMatch(raw.companyName, getDetailHeading())) { matched = true; break }
+    await sleep(200)
+  }
+
+  if (matched) {
+    await sleep(300) // let phone/website finish rendering after the heading appears
+    const panel = extractDetailPanelData()
+    // The detail panel's data is more complete than the list card's (which
+    // truncates addresses and rarely shows phone/website at all) — prefer it
+    // outright rather than only filling gaps.
+    if (panel.phone) raw.phone = panel.phone
+    if (panel.website) raw.website = panel.website
+    if (panel.address) raw.address = panel.address
+  }
+
+  const backBtn = document.querySelector('button[aria-label="Back" i]') as HTMLElement | null
+  if (backBtn) backBtn.click()
+  else history.back()
+
+  const backStart = Date.now()
+  while (Date.now() - backStart < 2500) {
+    if (extractResultPanel()) break
+    await sleep(150)
+  }
 }
 
 // ─── Core capture logic ───────────────────────────────────────────────────────
@@ -65,44 +131,62 @@ function sendProgress(status: 'running' | 'completed' | 'stopped' | 'error', msg
   }).catch(() => {})
 }
 
-function captureVisible() {
+async function captureVisible() {
   if (!captureActive || sessionId === null) return
+  if (visiting) return   // a previous sweep is still click-visiting cards
+  visiting = true
 
-  // Snapshot detail panel once per tick — fills gaps when a card is selected
-  const detailPanel = extractDetailPanelData()
+  try {
+    // Snapshot detail panel once up front — fills gaps when a card already
+    // happens to be selected before we start clicking into anything ourselves.
+    const detailPanel = extractDetailPanelData()
 
-  const cards = extractVisibleCards()
-  for (const raw of cards) {
-    if (totalSent >= maxResults) {
-      stopCapture('max_reached')
-      return
+    const cards = extractVisibleCards()
+    const newRaws: RawBusinessCard[] = []
+    for (const raw of cards) {
+      // Local content-script dedup by URL or name (DB-level dedup is in background)
+      const key = raw.googleMapsUrl || raw.companyName
+      if (capturedUrls.has(key)) continue
+      capturedUrls.add(key)
+
+      if (detailPanel && isDetailPanelMatch(raw.companyName, detailPanel)) {
+        if (!raw.phone && detailPanel.phone) raw.phone = detailPanel.phone
+        if (!raw.website && detailPanel.website) raw.website = detailPanel.website
+        if (!raw.address && detailPanel.address) raw.address = detailPanel.address
+      }
+      newRaws.push(raw)
     }
 
-    // Local content-script dedup by URL or name (DB-level dedup is in background)
-    const key = raw.googleMapsUrl || raw.companyName
-    if (capturedUrls.has(key)) continue
-    capturedUrls.add(key)
+    for (const raw of newRaws) {
+      if (!captureActive) break
+      if (totalSent >= maxResults) { stopCapture('max_reached'); break }
 
-    // Merge detail panel data for missing fields (panel matches the selected card)
-    if (detailPanel && isDetailPanelMatch(raw.companyName, detailPanel)) {
-      if (!raw.phone && detailPanel.phone) raw.phone = detailPanel.phone
-      if (!raw.website && detailPanel.website) raw.website = detailPanel.website
-      if (!raw.address && detailPanel.address) raw.address = detailPanel.address
+      // List cards essentially never carry phone/website — click into the
+      // detail panel to fill them in (and get the untruncated address).
+      if (!raw.phone || !raw.website) {
+        await visitCardDetails(raw)
+      }
+
+      const lead = buildLead(raw, sessionId, '', '', '')
+      totalSent++
+      chrome.runtime.sendMessage({
+        type: MSG.LEAD_FOUND,
+        payload: { lead, sessionId },
+      }).catch(() => {})
+
+      sendProgress('running', `${totalSent} leads captured`)
+      scroller?.updateLastCount(totalSent)
     }
 
-    const lead = buildLead(raw, sessionId, '', '', '')
-    totalSent++
-
-    chrome.runtime.sendMessage({
-      type: MSG.LEAD_FOUND,
-      payload: { lead, sessionId },
-    }).catch(() => {})
+    // Heartbeat even when this sweep found nothing new (e.g. still loading
+    // the next lazy-load batch) — keeps the dashboard progress UI live.
+    if (newRaws.length === 0) {
+      sendProgress('running', `${totalSent} leads captured`)
+      scroller?.updateLastCount(totalSent)
+    }
+  } finally {
+    visiting = false
   }
-
-  sendProgress('running', `${totalSent} leads captured`)
-  // Pass cumulative unique leads sent (totalSent) not cards.length —
-  // Maps virtual list keeps DOM card count flat; totalSent grows only when new results appear.
-  scroller?.updateLastCount(totalSent)
 }
 
 function stopCapture(reason: CaptureFinishedPayload['reason']) {

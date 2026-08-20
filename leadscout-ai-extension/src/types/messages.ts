@@ -25,6 +25,7 @@ export const MSG = {
   // Dashboard → Background (manual triggers)
   TRIGGER_RESEARCH:  'TRIGGER_RESEARCH',
   PIPELINE_RUN:      'PIPELINE_RUN',   // (re)run enrichment + validation + research
+  PIPELINE_RUN_STEP: 'PIPELINE_RUN_STEP', // re-run ONE step (enrichment/validation/research) for a session
   PIPELINE_STOP:     'PIPELINE_STOP',  // stop the running pipeline
   VERIFY_FROM_GOOGLE:'VERIFY_FROM_GOOGLE', // fetch exact turnover/team size from Google AI mode
   QUALIFY_IMPORTED:  'QUALIFY_IMPORTED',   // validate/score imported leads against the ICP
