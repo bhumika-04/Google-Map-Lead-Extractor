@@ -1,16 +1,37 @@
 import { db } from '@/db/db'
 import { restoreFromSql } from '@/services/pipelineSyncService'
+import { searchProjectRepository } from '@/db/searchProjectRepository'
 import { nowISO } from '@/utils/date'
 import type { SessionRecord } from '@/types/session'
 import type { ScrapedLead } from '@/types/pipelineLead'
+import type { Lead, LeadStatus } from '@/types/lead'
+import type { SearchProjectStatus } from '@/types/searchProject'
 
-// Restore-down: rebuild local Dexie (sessions / scrapedLeads / importedLeads)
-// from the new MSSQL schema via /api/restore. Non-destructive — upserts by
-// mssqlId, so re-running merges rather than duplicating, and never wipes.
+// Restore-down: rebuild local Dexie from the new MSSQL schema via /api/restore.
+// Populates BOTH the new tables (sessions / scrapedLeads / importedLeads) AND the
+// legacy tables the session UIs still read (searchProjects + leads for scrape
+// sessions) — so a fresh device shows sessions, cards, and the whole pipeline.
+// Non-destructive: upserts by mssqlId / (project+name), so re-running merges.
 
 function parseJson<T>(s: unknown, fallback: T): T {
   if (typeof s !== 'string' || !s.trim()) return fallback
   try { return JSON.parse(s) as T } catch { return fallback }
+}
+
+function toProjectStatus(s: string): SearchProjectStatus {
+  return s === 'running' ? 'running' : s === 'stopped' ? 'stopped' : 'completed'
+}
+
+function toOldStatus(s: string): LeadStatus {
+  switch (s) {
+    case 'not_relevant':       return 'rejected'
+    case 'research_queued':    return 'research_pending'
+    case 'research_running':   return 'research_running'
+    case 'research_completed': return 'research_completed'
+    case 'research_failed':    return 'research_failed'
+    case 'selected':           return 'selected'
+    default:                   return 'new'
+  }
 }
 
 function mapSession(row: any): SessionRecord {
@@ -86,41 +107,116 @@ function mapLead(row: any, localSessionId: number): ScrapedLead & { importFile?:
   }
 }
 
-async function restoreLeads(rows: any[], table: any, serverToLocalSession: Map<number, number>): Promise<number> {
-  const existing: any[] = await table.toArray()
-  const byMssql = new Map<number, number>(existing.filter((l) => l.mssqlId != null).map((l) => [l.mssqlId, l.id]))
-  let n = 0
-  for (const row of rows) {
-    const localSession = serverToLocalSession.get(row.session_id)
-    if (localSession === undefined) continue
-    const rec = mapLead(row, localSession)
-    const existingLocal = byMssql.get(rec.mssqlId!)
-    if (existingLocal) await table.update(existingLocal, rec)
-    else await table.add(rec)
-    n++
+// Legacy `leads` row (so the workspace LeadTable + session cards, which read old
+// leads, show restored scrape data).
+function mapOldLead(row: any, projectId: number): Omit<Lead, 'id'> {
+  return {
+    sessionId: 0,
+    projectId,
+    companyName: row.company_name ?? '',
+    normalizedName: row.normalized_name ?? '',
+    category: row.category ?? undefined,
+    rating: row.rating ?? undefined,
+    reviewCount: row.review_count ?? undefined,
+    address: row.address ?? undefined,
+    phone: row.phone ?? undefined,
+    website: row.website ?? undefined,
+    googleMapsUrl: row.google_maps_url ?? undefined,
+    searchQuery: '',
+    city: row.city ?? '',
+    keyword: row.keyword ?? '',
+    source: 'google_maps',
+    confidence: 0.9,
+    status: toOldStatus(row.status ?? 'new'),
+    validationStatus: row.validation_status ?? undefined,
+    icpScore: row.icp_score ?? undefined,
+    icpReason: row.icp_reason ?? undefined,
+    teamSize: row.team_size ?? undefined,
+    annualTurnover: row.annual_turnover ?? undefined,
+    industry: row.industry ?? undefined,
+    companyType: row.company_type ?? undefined,
+    decisionMaker: row.decision_maker ?? undefined,
+    country: row.country ?? undefined,
+    capturedAt: row.captured_at ?? nowISO(),
+    updatedAt: row.updated_at ?? nowISO(),
   }
-  return n
 }
 
 export async function restoreFromNewSchema(): Promise<{ sessions: number; scraped: number; imported: number } | null> {
   const data = await restoreFromSql()
   if (!data) return null
 
-  // Sessions first — build server-id → local-id map so leads link correctly.
-  const serverToLocal = new Map<number, number>()
+  // ── Sessions → db.sessions (new) + searchProjects (old, scrape only) ────────
+  const serverToLocalSession = new Map<number, number>()  // for new scrapedLeads
+  const serverToLocalProject = new Map<number, number>()  // for old leads
+
   const existingSessions = await db.sessions.toArray()
-  const byMssql = new Map<number, number>(existingSessions.filter((s) => s.mssqlId != null).map((s) => [s.mssqlId!, s.id!]))
+  const sessionByMssql = new Map<number, number>(existingSessions.filter((s) => s.mssqlId != null).map((s) => [s.mssqlId!, s.id!]))
+
+  const existingProjects = await searchProjectRepository.getAll().catch(() => [])
+  const projectByMssql = new Map<number, number>(existingProjects.filter((p) => p.newSessionMssqlId != null).map((p) => [p.newSessionMssqlId!, p.id!]))
 
   for (const row of data.sessions ?? []) {
     const rec = mapSession(row)
-    let localId = byMssql.get(rec.mssqlId!)
-    if (localId) await db.sessions.update(localId, rec)
-    else localId = await db.sessions.add(rec)
-    serverToLocal.set(rec.mssqlId!, localId)
+    let localSessionId = sessionByMssql.get(rec.mssqlId!)
+    if (localSessionId) await db.sessions.update(localSessionId, rec)
+    else localSessionId = await db.sessions.add(rec)
+    serverToLocalSession.set(rec.mssqlId!, localSessionId)
+
+    if (rec.source === 'scrape') {
+      let projectId = projectByMssql.get(rec.mssqlId!)
+      if (!projectId) {
+        projectId = await searchProjectRepository.create({
+          name: rec.name, country: rec.country ?? 'IN',
+          keywords: rec.keywords, cities: rec.cities,
+          businessProfile: rec.businessProfile ?? '',
+          status: toProjectStatus(rec.status),
+          totalTerms: 0, completedTerms: 0, totalLeads: rec.totalLeads,
+          source: 'search_console',
+          newSessionId: localSessionId, newSessionMssqlId: rec.mssqlId,
+        })
+      }
+      serverToLocalProject.set(rec.mssqlId!, projectId)
+    }
   }
 
-  const scraped = await restoreLeads(data.scrapedLeads ?? [], db.scrapedLeads, serverToLocal)
-  const imported = await restoreLeads(data.importedLeads ?? [], db.importedLeads, serverToLocal)
+  // ── Scraped leads → db.scrapedLeads (new) + db.leads (old, per project) ──────
+  const existingScraped = await db.scrapedLeads.toArray()
+  const scrapedByMssql = new Map<number, number>(existingScraped.filter((l) => l.mssqlId != null).map((l) => [l.mssqlId!, l.id!]))
+  const existingOld = await db.leads.toArray()
+  const oldByKey = new Set(existingOld.map((l) => `${l.projectId ?? -1}|${l.normalizedName}`))
+
+  let scraped = 0
+  for (const row of data.scrapedLeads ?? []) {
+    const localSession = serverToLocalSession.get(row.session_id)
+    if (localSession === undefined) continue
+    const rec = mapLead(row, localSession)
+    const existingLocal = scrapedByMssql.get(rec.mssqlId!)
+    if (existingLocal) await db.scrapedLeads.update(existingLocal, rec)
+    else await db.scrapedLeads.add(rec)
+
+    // Mirror into legacy leads for the session's project (dedupe by project+name).
+    const projectId = serverToLocalProject.get(row.session_id)
+    if (projectId !== undefined) {
+      const key = `${projectId}|${rec.normalizedName}`
+      if (!oldByKey.has(key)) { await db.leads.add(mapOldLead(row, projectId) as Lead); oldByKey.add(key) }
+    }
+    scraped++
+  }
+
+  // ── Imported leads → db.importedLeads (new; Lead Database reads this) ────────
+  const existingImported = await db.importedLeads.toArray()
+  const importedByMssql = new Map<number, number>(existingImported.filter((l) => l.mssqlId != null).map((l) => [l.mssqlId!, l.id!]))
+  let imported = 0
+  for (const row of data.importedLeads ?? []) {
+    const localSession = serverToLocalSession.get(row.session_id)
+    if (localSession === undefined) continue
+    const rec = mapLead(row, localSession)
+    const existingLocal = importedByMssql.get(rec.mssqlId!)
+    if (existingLocal) await db.importedLeads.update(existingLocal, rec)
+    else await db.importedLeads.add(rec)
+    imported++
+  }
 
   return { sessions: (data.sessions ?? []).length, scraped, imported }
 }

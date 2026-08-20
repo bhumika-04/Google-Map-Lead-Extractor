@@ -220,6 +220,14 @@ html.light .text-sky-400     { color: #0369a1 !important; }
 html.light .text-emerald-400 { color: #059669 !important; }
 html.light .text-violet-400  { color: #7c3aed !important; }
 
+/* Toasts use dark-named bg (bg-green-900 etc.) that light mode tints light, but
+   their message text is text-*-100 (very light) — override so it stays readable
+   on the tinted background instead of light-on-light (invisible). */
+html.light .text-green-100  { color: #14532d !important; }
+html.light .text-red-100    { color: #7f1d1d !important; }
+html.light .text-blue-100   { color: #1e3a8a !important; }
+html.light .text-yellow-100 { color: #713f12 !important; }
+
 /* Session-status badge tints */
 html.light .bg-green-950\/70 { background-color: #dcfce7 !important; }
 html.light .bg-blue-950\/70  { background-color: #dbeafe !important; }
