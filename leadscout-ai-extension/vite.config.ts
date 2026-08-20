@@ -60,6 +60,11 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: false,
+    // Chrome extension pages (chrome-extension://, isolated worlds) log noisy
+    // "preloaded but not used / cross-world resource mismatch" warnings for
+    // Vite's <link rel="modulepreload"> hints. They don't help in an extension,
+    // so disable them entirely to keep the console clean.
+    modulePreload: false,
     rollupOptions: {
       input: {
         popup:         resolve(__dirname, 'src/popup/popup.html'),

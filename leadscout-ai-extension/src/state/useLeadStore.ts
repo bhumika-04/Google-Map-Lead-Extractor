@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import type { Lead, LeadStatus, LeadFilter } from '@/types/lead'
 import { leadRepository } from '@/db/leadRepository'
-import { saveLeadValidationToSql, saveLeadMetaToSql } from '@/services/sqlSyncService'
 
 /** Country/city scope set by the Markets page — LeadTable applies it on top of its own filters. */
 export interface MarketScope {
@@ -68,24 +67,6 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       leads: s.leads.map((l) => (l.id === id ? { ...l, status } : l)),
       detailLead: s.detailLead?.id === id ? { ...s.detailLead, status } : s.detailLead,
     }))
-    // Persist status changes to MSSQL so SYNC_FROM_DB restores them correctly
-    const lead = get().leads.find((l) => l.id === id)
-    if (lead && (status === 'selected' || status === 'rejected')) {
-      saveLeadValidationToSql({
-        id: id,
-        companyName: lead.companyName,
-        city: lead.city,
-        keyword: lead.keyword,
-        address: lead.address,
-        phone: lead.phone,
-        website: lead.website,
-        googleMapsUrl: lead.googleMapsUrl,
-        rating: lead.rating,
-        reviewCount: lead.reviewCount,
-        category: lead.category,
-        validationStatus: status,
-      }).catch(() => {})
-    }
   },
 
   async updateLeadNotes(id, notes) {
@@ -94,8 +75,6 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       leads: s.leads.map((l) => (l.id === id ? { ...l, notes } : l)),
       detailLead: s.detailLead?.id === id ? { ...s.detailLead, notes } : s.detailLead,
     }))
-    const lead = get().leads.find((l) => l.id === id)
-    if (lead?.mssqlId) saveLeadMetaToSql(lead.mssqlId, { notes }).catch(() => {})
   },
 
   async updateLeadTags(id, tags) {
@@ -104,8 +83,6 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       leads: s.leads.map((l) => (l.id === id ? { ...l, tags } : l)),
       detailLead: s.detailLead?.id === id ? { ...s.detailLead, tags } : s.detailLead,
     }))
-    const lead = get().leads.find((l) => l.id === id)
-    if (lead?.mssqlId) saveLeadMetaToSql(lead.mssqlId, { tags }).catch(() => {})
   },
 
   toggleSelect(id) {
