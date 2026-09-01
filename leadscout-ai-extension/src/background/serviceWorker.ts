@@ -303,8 +303,18 @@ async function runVerifyFromGoogle(projectId?: number) {
     const targets = leads.filter((l) => !l.turnoverVerified || !l.teamSizeVerified)
     await setPipelineState({ status: 'running', phase: 'verifying', processed: 0, total: targets.length, projectId })
 
+    // Mirror periodically DURING the run (one Google search per lead is slow
+    // — a large batch would otherwise leave the funnel frozen for the whole
+    // run, same issue as enrichment/validation).
+    let lastReconciled = 0
     const updated = await verifyLeadsFromGoogle(targets, {
-      onProgress: (done, total) => { setPipelineState({ processed: done, total }).catch(() => {}) },
+      onProgress: (done, total) => {
+        setPipelineState({ processed: done, total }).catch(() => {})
+        if (done - lastReconciled >= 20 || done === total) {
+          lastReconciled = done
+          reconcileScrapedForLeads(targets, 'enrichment').catch(() => {})
+        }
+      },
       shouldStop: () => isPipelineStopRequested(),
     })
     reconcileScrapedForLeads(targets, 'enrichment').catch(() => {})
