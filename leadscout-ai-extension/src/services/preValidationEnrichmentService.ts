@@ -36,6 +36,12 @@ export async function runPreValidationEnrichment(
   _apiKey: string,
   onProgress?: (done: number, total: number) => void,
   shouldStop?: () => boolean | Promise<boolean>,
+  // Fired once the already-enriched leads have been filtered out, so callers
+  // can show an accurate "X leads (Y already done, skipping)" message instead
+  // of the raw input count — resuming after a Stop looked like it was
+  // restarting from scratch because the caller's toast reported the full
+  // scope (e.g. 500) instead of what was actually about to run (e.g. 348).
+  onScopeResolved?: (toEnrichCount: number, alreadyDoneCount: number) => void,
 ): Promise<void> {
   const geminiApiKey = settings.geminiApiKey?.trim()
   const geminiModel  = settings.geminiModel || 'gemini-flash-latest'
@@ -61,8 +67,10 @@ export async function runPreValidationEnrichment(
   const existingResults  = await researchResultRepository.getAll()
   const alreadyEnriched  = new Set(existingResults.filter((r) => r.jobId === 0).map((r) => r.leadId))
   const toEnrich         = leads.filter((l) => l.id && !alreadyEnriched.has(l.id))
+  const alreadyDoneCount = leads.length - toEnrich.length
 
-  console.log(`[enrichment] 📋 Leads to enrich: ${toEnrich.length} (${leads.length - toEnrich.length} already done, skipping)`)
+  console.log(`[enrichment] 📋 Leads to enrich: ${toEnrich.length} (${alreadyDoneCount} already done, skipping)`)
+  onScopeResolved?.(toEnrich.length, alreadyDoneCount)
 
   if (toEnrich.length === 0) {
     console.log('[enrichment] ✅ Nothing to do — all leads already enriched.')
@@ -70,6 +78,7 @@ export async function runPreValidationEnrichment(
   }
 
   const total = toEnrich.length
+  onProgress?.(0, total)   // show the real (reduced) total immediately, not 0/0
 
   for (let i = 0; i < toEnrich.length; i++) {
     if (shouldStop && await shouldStop()) {

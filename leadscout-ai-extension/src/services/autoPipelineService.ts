@@ -92,10 +92,16 @@ export async function runAutoValidationAndResearch(
 
   // ── Step 1: enrichment (writes fields live per lead) ──────────────────────
   onPhaseChange?.('quick_enrichment_running')
-  toast.info(`Step 1/3 — Enriching ${newLeads.length} leads…`)
   console.log(`[auto-pipeline] Step 1: enrichment`)
+  const onScopeResolved = (toEnrichCount: number, alreadyDoneCount: number) => {
+    toast.info(
+      alreadyDoneCount > 0
+        ? `Step 1/3 — Enriching ${toEnrichCount} leads (${alreadyDoneCount} already done, resuming)…`
+        : `Step 1/3 — Enriching ${toEnrichCount} leads…`
+    )
+  }
   try {
-    await runPreValidationEnrichment(newLeads, settings, apiKey, onProgress, shouldStop)
+    await runPreValidationEnrichment(newLeads, settings, apiKey, onProgress, shouldStop, onScopeResolved)
   } catch (err) {
     console.warn('[auto-pipeline] Enrichment error (non-fatal):', err)
   }
