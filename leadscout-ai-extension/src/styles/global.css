@@ -208,6 +208,14 @@ html.light .bg-green-900      { background-color: #dcfce7 !important; }
 html.light .bg-red-900        { background-color: #fee2e2 !important; }
 html.light .bg-purple-900     { background-color: #f3e8ff !important; }
 html.light .bg-blue-900       { background-color: #dbeafe !important; }
+html.light .bg-sky-900\/40     { background-color: #e0f2fe !important; }
+html.light .bg-indigo-900\/40  { background-color: #e0e7ff !important; }
+html.light .bg-violet-900\/40  { background-color: #ede9fe !important; }
+html.light .bg-yellow-900\/40  { background-color: #fef3c7 !important; }
+html.light .bg-green-900\/40   { background-color: #dcfce7 !important; }
+html.light .hover\:bg-sky-900\/70:hover    { background-color: #bae6fd !important; }
+html.light .hover\:bg-indigo-900\/70:hover { background-color: #c7d2fe !important; }
+html.light .hover\:bg-violet-900\/70:hover { background-color: #ddd6fe !important; }
 
 /* Light-tone accent text → darkened so it reads on the light background */
 html.light .text-green-300, html.light .text-green-200  { color: #15803d !important; }
@@ -215,10 +223,24 @@ html.light .text-blue-300,  html.light .text-blue-200   { color: #1d4ed8 !import
 html.light .text-yellow-300, html.light .text-amber-400 { color: #b45309 !important; }
 html.light .text-red-400,   html.light .text-red-300    { color: #dc2626 !important; }
 html.light .text-purple-300, html.light .text-purple-200 { color: #7c3aed !important; }
-html.light .text-indigo-100, html.light .text-indigo-200 { color: #4338ca !important; }
+html.light .text-purple-400  { color: #7c3aed !important; }
+html.light .text-indigo-100, html.light .text-indigo-200, html.light .text-indigo-300 { color: #4338ca !important; }
 html.light .text-sky-400     { color: #0369a1 !important; }
+html.light .text-sky-300     { color: #0369a1 !important; }
 html.light .text-emerald-400 { color: #059669 !important; }
-html.light .text-violet-400  { color: #7c3aed !important; }
+html.light .text-violet-400, html.light .text-violet-300 { color: #7c3aed !important; }
+html.light .text-yellow-600  { color: #b45309 !important; }
+html.light .text-green-600   { color: #15803d !important; }
+
+/* Badge/pill borders → the dark-mode -700/-800 shades read as near-invisible
+   hairlines on a white background */
+html.light .border-sky-800\/50     { border-color: #7dd3fc !important; }
+html.light .border-indigo-800\/50  { border-color: #a5b4fc !important; }
+html.light .border-violet-800\/50  { border-color: #c4b5fd !important; }
+html.light .border-purple-700      { border-color: #c084fc !important; }
+html.light .border-blue-800\/40    { border-color: #93c5fd !important; }
+html.light .border-yellow-700\/40  { border-color: #fcd34d !important; }
+html.light .border-green-700\/40   { border-color: #86efac !important; }
 
 /* Toasts use dark-named bg (bg-green-900 etc.) that light mode tints light, but
    their message text is text-*-100 (very light) — override so it stays readable

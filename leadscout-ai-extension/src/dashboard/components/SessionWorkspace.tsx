@@ -14,6 +14,7 @@ import { MSG } from '@/types/messages'
 import { COUNTRIES, flag } from './SearchConsole'
 import { timeAgo } from '@/utils/date'
 import LeadTable from './LeadTable'
+import SessionCsvImport from './SessionCsvImport'
 import PipelineControl, { ValidationFeed } from './PipelineControl'
 import type { SearchProject } from '@/types/searchProject'
 import type { Lead } from '@/types/lead'
@@ -338,10 +339,20 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
       )}
       {/* Leads tab keeps the full-featured LeadTable (same mirrored data, but with
           columns/actions/export). Funnel + Selected + Researched read the new tables. */}
-      {tab === 'leads' && <LeadTable title="Leads in this session" />}
-      {tab === 'selected' && (useNew
-        ? <SelectedTable rows={selectedScraped.map(toSelectedRow)} />
-        : <SelectedTable rows={selRows} />)}
+      {tab === 'leads' && (
+        <div className="flex flex-col gap-3 min-h-0 flex-1">
+          <SessionCsvImport mode="leads" projectId={projectId} />
+          <LeadTable title="Leads in this session" />
+        </div>
+      )}
+      {tab === 'selected' && (
+        <div className="flex flex-col gap-3 min-h-0 flex-1">
+          <SessionCsvImport mode="selected" projectId={projectId} />
+          {useNew
+            ? <SelectedTable rows={selectedScraped.map(toSelectedRow)} />
+            : <SelectedTable rows={selRows} />}
+        </div>
+      )}
       {tab === 'researched' && (useNew
         ? <ResearchedTable rows={researchedScraped.map(toResearchedRow)} />
         : <ResearchedTable rows={resRows} />)}
