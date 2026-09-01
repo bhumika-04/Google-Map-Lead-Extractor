@@ -154,53 +154,89 @@ app.MapDelete("/api/sessions/{id:int}", async (int id) =>
 // Upsert a batch of leads for a session (dedupe on session_id + normalized_name).
 // Capture fields only — enrichment/validation/research are set by their own endpoints
 // and are never clobbered by a re-sync.
+//
+// Set-based: one MERGE for the whole batch via OPENJSON, instead of one MERGE
+// per lead in a loop. A capture batch can be hundreds of leads; at one round
+// trip each over the network to a remote SQL Server, that loop could run long
+// enough (and hold row locks long enough against overlapping capture batches)
+// to blow SQL's command timeout — seen as repeated "Execution Timeout Expired"
+// on this endpoint. A single set-based statement is one round trip regardless
+// of batch size.
 app.MapPost("/api/leads/{kind}/save-batch", async (string kind, SaveBatchIn body) =>
 {
     string table;
     try { table = LeadTable(kind); } catch (ArgumentException e) { return Results.BadRequest(new { error = e.Message }); }
 
     var importCols = kind == "imported" ? ", import_file, source_row_json" : "";
-    var importVals = kind == "imported" ? ", @ImportFile, @SourceRowJson" : "";
+    var importVals = kind == "imported" ? ", s.import_file, s.source_row_json" : "";
     var stampCol   = kind == "imported" ? "imported_at" : "captured_at";
+
+    // MERGE forbids a USING source with duplicate join keys ("attempted to
+    // UPDATE or DELETE the same row more than once") — a batch occasionally
+    // repeats the same company (e.g. re-appearing while scrolling). Keep the
+    // last occurrence per normalized_name, matching the old loop's effective
+    // behavior (each iteration's MERGE overwrote whatever the previous one wrote).
+    var deduped = new Dictionary<string, LeadIn>();
+    foreach (var l in body.Leads) deduped[l.NormalizedName] = l;
+    if (deduped.Count == 0) return Results.Ok(new { saved = 0, ids = Array.Empty<object>() });
+
+    var leadsJson = JsonSerializer.Serialize(deduped.Values.Select(l => new
+    {
+        companyName = l.CompanyName, normalizedName = l.NormalizedName, category = l.Category,
+        rating = l.Rating, reviewCount = l.ReviewCount, address = l.Address, phone = l.Phone,
+        website = l.Website, googleMapsUrl = l.GoogleMapsUrl, mapScore = l.MapScore, city = l.City,
+        keyword = l.Keyword, country = l.Country,
+        status = string.IsNullOrWhiteSpace(l.Status) ? "new" : l.Status,
+        notes = l.Notes, tagsJson = l.TagsJson,
+        importFile = body.ImportFile, sourceRowJson = l.SourceRowJson,
+    }));
 
     var sql = $"""
         MERGE {table} AS t
-        USING (SELECT @SessionId AS session_id, @NormalizedName AS normalized_name) AS s
+        USING (
+          SELECT @SessionId AS session_id, j.*
+          FROM OPENJSON(@LeadsJson) WITH (
+            company_name     NVARCHAR(300)  '$.companyName',
+            normalized_name  NVARCHAR(120)  '$.normalizedName',
+            category         NVARCHAR(200)  '$.category',
+            rating           DECIMAL(3,2)   '$.rating',
+            review_count     INT            '$.reviewCount',
+            address          NVARCHAR(500)  '$.address',
+            phone            NVARCHAR(60)   '$.phone',
+            website          NVARCHAR(500)  '$.website',
+            google_maps_url  NVARCHAR(1000) '$.googleMapsUrl',
+            map_score        INT            '$.mapScore',
+            city             NVARCHAR(120)  '$.city',
+            keyword          NVARCHAR(200)  '$.keyword',
+            country          NVARCHAR(10)   '$.country',
+            status           NVARCHAR(30)   '$.status',
+            notes            NVARCHAR(MAX)  '$.notes',
+            tags_json        NVARCHAR(MAX)  '$.tagsJson',
+            import_file      NVARCHAR(300)  '$.importFile',
+            source_row_json  NVARCHAR(MAX)  '$.sourceRowJson'
+          ) j
+        ) AS s
           ON t.session_id = s.session_id AND t.normalized_name = s.normalized_name
         WHEN MATCHED THEN UPDATE SET
-          company_name = @CompanyName, category = @Category, rating = @Rating,
-          review_count = @ReviewCount, address = @Address, phone = @Phone, website = @Website,
-          google_maps_url = @GoogleMapsUrl, map_score = @MapScore, city = @City,
-          keyword = @Keyword, country = @Country, notes = COALESCE(@Notes, t.notes),
-          tags_json = COALESCE(@TagsJson, t.tags_json), updated_at = SYSUTCDATETIME()
+          company_name = s.company_name, category = s.category, rating = s.rating,
+          review_count = s.review_count, address = s.address, phone = s.phone, website = s.website,
+          google_maps_url = s.google_maps_url, map_score = s.map_score, city = s.city,
+          keyword = s.keyword, country = s.country, notes = COALESCE(s.notes, t.notes),
+          tags_json = COALESCE(s.tags_json, t.tags_json), updated_at = SYSUTCDATETIME()
         WHEN NOT MATCHED THEN INSERT
           (session_id, company_name, normalized_name, category, rating, review_count, address,
            phone, website, google_maps_url, map_score, city, keyword, country, status, notes,
            tags_json, {stampCol}{importCols})
           VALUES
-          (@SessionId, @CompanyName, @NormalizedName, @Category, @Rating, @ReviewCount, @Address,
-           @Phone, @Website, @GoogleMapsUrl, @MapScore, @City, @Keyword, @Country, @Status, @Notes,
-           @TagsJson, SYSUTCDATETIME(){importVals})
+          (s.session_id, s.company_name, s.normalized_name, s.category, s.rating, s.review_count, s.address,
+           s.phone, s.website, s.google_maps_url, s.map_score, s.city, s.keyword, s.country, s.status, s.notes,
+           s.tags_json, SYSUTCDATETIME(){importVals})
         OUTPUT INSERTED.id, INSERTED.normalized_name;
         """;
 
     using var db = Db();
-    await db.OpenAsync();
-    using var tx = db.BeginTransaction();
-    var ids = new List<object>();
-    foreach (var l in body.Leads)
-    {
-        var row = await db.QuerySingleAsync(sql, new
-        {
-            body.SessionId, body.ImportFile,
-            l.CompanyName, l.NormalizedName, l.Category, l.Rating, l.ReviewCount, l.Address,
-            l.Phone, l.Website, l.GoogleMapsUrl, l.MapScore, l.City, l.Keyword, l.Country,
-            Status = string.IsNullOrWhiteSpace(l.Status) ? "new" : l.Status,
-            l.Notes, l.TagsJson, l.SourceRowJson,
-        }, tx);
-        ids.Add(new { normalizedName = (string)row.normalized_name, id = (int)row.id });
-    }
-    tx.Commit();
+    var rows = (await db.QueryAsync(sql, new { body.SessionId, LeadsJson = leadsJson })).ToList();
+    var ids = rows.Select(row => new { normalizedName = (string)row.normalized_name, id = (int)row.id }).ToList();
     return Results.Ok(new { saved = ids.Count, ids });
 });
 
