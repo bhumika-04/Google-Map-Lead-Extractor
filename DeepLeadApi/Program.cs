@@ -310,6 +310,15 @@ app.MapPost("/api/leads/{kind}/save-batch", async (string kind, SaveBatchIn body
     }
 });
 
+// Free-form AI output (enrichment/research fields) has no guaranteed length —
+// a model can return a full paragraph where a short "decision maker" name or
+// "team size" figure was expected, which crashes a plain UPDATE against a
+// narrow NVARCHAR column ("String or binary data would be truncated"),
+// losing the entire write. Trim client-side to each column's actual max
+// width so oversized AI text degrades to a truncated value instead of a
+// failed request.
+static string? Trunc(string? s, int max) => s == null ? null : (s.Length > max ? s[..max] : s);
+
 // Enrichment result → inline columns + enrichment_json.
 app.MapPut("/api/leads/{kind}/{id:int}/enrichment", async (string kind, int id, EnrichmentIn body) =>
 {
@@ -337,9 +346,15 @@ app.MapPut("/api/leads/{kind}/{id:int}/enrichment", async (string kind, int id, 
         WHERE id = @Id;
         """, new
     {
-        Id = id, body.TeamSize, body.AnnualTurnover, body.Industry, body.DecisionMaker, body.Email,
-        body.AlternatePhone, body.YearFounded, body.CompanyType, body.EmployeeCount, body.Headquarters,
-        body.LinkedIn, body.Facebook, body.Instagram, body.Twitter, body.Youtube, body.Whatsapp,
+        Id = id,
+        TeamSize = Trunc(body.TeamSize, 50), AnnualTurnover = Trunc(body.AnnualTurnover, 80),
+        Industry = Trunc(body.Industry, 200), DecisionMaker = Trunc(body.DecisionMaker, 200),
+        Email = Trunc(body.Email, 200), AlternatePhone = Trunc(body.AlternatePhone, 60),
+        body.YearFounded, CompanyType = Trunc(body.CompanyType, 80), EmployeeCount = Trunc(body.EmployeeCount, 50),
+        Headquarters = Trunc(body.Headquarters, 200),
+        LinkedIn = Trunc(body.LinkedIn, 500), Facebook = Trunc(body.Facebook, 500),
+        Instagram = Trunc(body.Instagram, 500), Twitter = Trunc(body.Twitter, 500),
+        Youtube = Trunc(body.Youtube, 500), Whatsapp = Trunc(body.Whatsapp, 200),
         body.EnrichmentJson, body.Confidence,
     });
     return Results.Ok(new { ok = true });
@@ -357,7 +372,10 @@ app.MapPut("/api/leads/{kind}/{id:int}/validation", async (string kind, int id, 
           icp_reason = @IcpReason, score_breakdown_json = @ScoreBreakdownJson,
           validated_at = SYSUTCDATETIME(), updated_at = SYSUTCDATETIME()
         WHERE id = @Id;
-        """, new { Id = id, body.ValidationStatus, body.IcpScore, body.IcpStatus, body.IcpReason, body.ScoreBreakdownJson });
+        """, new {
+            Id = id, ValidationStatus = Trunc(body.ValidationStatus, 20), body.IcpScore,
+            IcpStatus = Trunc(body.IcpStatus, 30), body.IcpReason, body.ScoreBreakdownJson,
+        });
     return Results.Ok(new { ok = true });
 });
 
@@ -375,7 +393,10 @@ app.MapPost("/api/leads/{kind}/validate-bulk", async (string kind, ValidationBul
           validated_at=SYSUTCDATETIME(), updated_at=SYSUTCDATETIME() WHERE id=@Id;
         """;
     foreach (var v in body.Items)
-        await db.ExecuteAsync(sql, new { v.Id, v.ValidationStatus, v.IcpScore, v.IcpStatus, v.IcpReason, v.ScoreBreakdownJson }, tx);
+        await db.ExecuteAsync(sql, new {
+            v.Id, ValidationStatus = Trunc(v.ValidationStatus, 20), v.IcpScore,
+            IcpStatus = Trunc(v.IcpStatus, 30), v.IcpReason, v.ScoreBreakdownJson,
+        }, tx);
     tx.Commit();
     return Results.Ok(new { updated = body.Items.Length });
 });
@@ -404,9 +425,13 @@ app.MapPut("/api/leads/{kind}/{id:int}/research", async (string kind, int id, Re
         WHERE id = @Id;
         """, new
     {
-        Id = id, body.ResearchStatus, body.ResearchSummary, body.ResearchJson, body.Confidence,
-        body.DecisionMaker, body.Email, body.AnnualTurnover, body.TeamSize, body.Industry,
-        body.LinkedIn, body.Facebook, body.Instagram, body.Twitter, body.Youtube, body.Whatsapp,
+        Id = id, ResearchStatus = Trunc(body.ResearchStatus, 20), body.ResearchSummary, body.ResearchJson, body.Confidence,
+        DecisionMaker = Trunc(body.DecisionMaker, 200), Email = Trunc(body.Email, 200),
+        AnnualTurnover = Trunc(body.AnnualTurnover, 80), TeamSize = Trunc(body.TeamSize, 50),
+        Industry = Trunc(body.Industry, 200),
+        LinkedIn = Trunc(body.LinkedIn, 500), Facebook = Trunc(body.Facebook, 500),
+        Instagram = Trunc(body.Instagram, 500), Twitter = Trunc(body.Twitter, 500),
+        Youtube = Trunc(body.Youtube, 500), Whatsapp = Trunc(body.Whatsapp, 200),
     });
     return Results.Ok(new { ok = true });
 });
