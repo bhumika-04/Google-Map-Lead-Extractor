@@ -248,9 +248,66 @@ app.MapPost("/api/leads/{kind}/save-batch", async (string kind, SaveBatchIn body
         """;
 
     using var db = Db();
-    var rows = (await db.QueryAsync(sql, new { body.SessionId, LeadsJson = leadsJson })).ToList();
-    var ids = rows.Select(row => new { normalizedName = (string)row.normalized_name, id = (int)row.id }).ToList();
-    return Results.Ok(new { saved = ids.Count, ids });
+    try
+    {
+        var rows = (await db.QueryAsync(sql, new { body.SessionId, LeadsJson = leadsJson })).ToList();
+        var ids = rows.Select(row => new { normalizedName = (string)row.normalized_name, id = (int)row.id }).ToList();
+        return Results.Ok(new { saved = ids.Count, ids });
+    }
+    catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number == 8672)
+    {
+        // "MERGE attempted to UPDATE/DELETE the same row more than once" — only
+        // possible if the TARGET table already has pre-existing duplicate
+        // (session_id, normalized_name) rows from before this batch even ran
+        // (e.g. an import attempted under older code, or a session whose
+        // unique index never actually got created). Rather than fail the whole
+        // batch, fall back to one MERGE per lead — a single-row source can
+        // never trigger this specific error, so this path always succeeds
+        // even against already-corrupted target data.
+        Console.Error.WriteLine($"[save-batch] Batch MERGE hit error 8672 (pre-existing duplicate rows) — falling back to per-lead upsert for session {body.SessionId}");
+        var rowSql = $"""
+            MERGE {table} AS t
+            USING (SELECT @SessionId AS session_id, @NormalizedName AS normalized_name) AS s
+              ON t.session_id = s.session_id AND t.normalized_name = s.normalized_name AND s.normalized_name <> ''
+            WHEN MATCHED THEN UPDATE SET
+              company_name = @CompanyName, category = @Category, rating = @Rating,
+              review_count = @ReviewCount, address = @Address, phone = @Phone, website = @Website,
+              google_maps_url = @GoogleMapsUrl, map_score = @MapScore, city = @City,
+              keyword = @Keyword, country = @Country, notes = COALESCE(@Notes, t.notes),
+              tags_json = COALESCE(@TagsJson, t.tags_json), updated_at = SYSUTCDATETIME()
+            WHEN NOT MATCHED THEN INSERT
+              (session_id, company_name, normalized_name, category, rating, review_count, address,
+               phone, website, google_maps_url, map_score, city, keyword, country, status, notes,
+               tags_json, {stampCol}{importCols})
+              VALUES
+              (@SessionId, @CompanyName, @NormalizedName, @Category, @Rating, @ReviewCount, @Address,
+               @Phone, @Website, @GoogleMapsUrl, @MapScore, @City, @Keyword, @Country, @Status, @Notes,
+               @TagsJson, SYSUTCDATETIME(){importVals.Replace("s.import_file", "@ImportFile").Replace("s.source_row_json", "@SourceRowJson")})
+            OUTPUT INSERTED.id, INSERTED.normalized_name;
+            """;
+
+        var ids = new List<object>();
+        foreach (var l in deduped.Values)
+        {
+            try
+            {
+                var row = await db.QuerySingleAsync(rowSql, new
+                {
+                    body.SessionId, body.ImportFile,
+                    l.CompanyName, l.NormalizedName, l.Category, l.Rating, l.ReviewCount, l.Address,
+                    l.Phone, l.Website, l.GoogleMapsUrl, l.MapScore, l.City, l.Keyword, l.Country,
+                    Status = string.IsNullOrWhiteSpace(l.Status) ? "new" : l.Status,
+                    l.Notes, l.TagsJson, l.SourceRowJson,
+                });
+                ids.Add(new { normalizedName = (string)row.normalized_name, id = (int)row.id });
+            }
+            catch (Microsoft.Data.SqlClient.SqlException rowEx)
+            {
+                Console.Error.WriteLine($"[save-batch] Skipped \"{l.CompanyName}\" (normalized: \"{l.NormalizedName}\") — {rowEx.Message}");
+            }
+        }
+        return Results.Ok(new { saved = ids.Count, ids });
+    }
 });
 
 // Enrichment result → inline columns + enrichment_json.
