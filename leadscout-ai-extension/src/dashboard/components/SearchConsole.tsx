@@ -257,6 +257,23 @@ export function CityMultiSelect({ selected, onChange, country, disabled }: CityM
     }
   }
 
+  // Pasting a comma/newline-separated list (e.g. from a spreadsheet) arrives
+  // as one block of text in a single change event — handleInputKeyDown never
+  // sees the individual commas, so it was left sitting in the search box as
+  // one giant unsplit string. Split it ourselves and add every piece as its
+  // own city chip. Single-value pastes fall through to normal typing.
+  function handlePaste(e: React.ClipboardEvent<HTMLInputElement>) {
+    const text = e.clipboardData.getData('text')
+    if (!/[,\n\t]/.test(text)) return
+    e.preventDefault()
+    const parts = text.split(/[,\n\t]/).map((s) => s.trim()).filter(Boolean)
+    if (parts.length === 0) return
+    const merged = [...selected]
+    for (const p of parts) if (!merged.includes(p)) merged.push(p)
+    onChange(merged)
+    setSearch('')
+  }
+
   function toggleCity(city: string) {
     if (selected.includes(city)) {
       onChange(selected.filter((c) => c !== city))
@@ -318,6 +335,7 @@ export function CityMultiSelect({ selected, onChange, country, disabled }: CityM
           onChange={(e) => { setSearch(e.target.value); setOpen(true) }}
           onFocus={() => setOpen(true)}
           onKeyDown={handleInputKeyDown}
+          onPaste={handlePaste}
           placeholder={selected.length === 0 ? 'Search or type a city…' : 'Add more…'}
           className="flex-1 min-w-[120px] bg-transparent text-white text-sm placeholder-gray-600 outline-none py-0.5"
         />
