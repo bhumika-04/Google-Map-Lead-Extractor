@@ -47,7 +47,13 @@ async function persistValidationBatch(batch: ValidationResult[]): Promise<void> 
     ...rel.map((r)    => ({ id: r.leadId, status: 'relevant'     as const, reason: r.reason })),
     ...notRel.map((r) => ({ id: r.leadId, status: 'not_relevant' as const, reason: r.reason })),
   ])
+  // Advance BOTH outcomes off 'new' — only relevant leads were being moved
+  // (to 'selected'), so a rejected lead's overarching status stayed 'new'
+  // forever. Since the pipeline's own resume logic scopes to `status ===
+  // 'new'`, every Continue click re-validated every previously-rejected
+  // lead again from scratch, burning API calls on leads already scored.
   await leadRepository.updateMany(rel.map((r) => r.leadId), { status: 'selected' })
+  await leadRepository.updateMany(notRel.map((r) => r.leadId), { status: 'rejected' })
   await leadRepository.bulkUpdateIcpFields(batch.map((r) => ({
     id: r.leadId, icpScore: r.icpScore, icpStatus: r.icpStatus,
     icpReason: r.reason, icpScoreBreakdown: r.scoreBreakdown,
