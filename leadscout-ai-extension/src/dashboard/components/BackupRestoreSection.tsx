@@ -26,17 +26,20 @@ export default function BackupRestoreSection() {
   const [importing, setImporting]   = useState(false)
   const [exporting, setExporting]   = useState(false)
   const [apiUp, setApiUp]           = useState<boolean | null>(null)
-  const [counts, setCounts]         = useState({ leads: 0, results: 0, jobs: 0 })
+  const [counts, setCounts]         = useState({ leads: 0, results: 0, jobs: 0, sessions: 0, scraped: 0, imported: 0 })
   const [apiUrl, setApiUrl]         = useState(getApiBase())
   const [savingUrl, setSavingUrl]   = useState(false)
 
   async function refreshCounts() {
-    const [leads, results, jobs] = await Promise.all([
+    const [leads, results, jobs, sessions, scraped, imported] = await Promise.all([
       db.leads.count(),
       db.researchResults.count(),
       db.researchJobs.count(),
+      db.sessions.count(),
+      db.scrapedLeads.count(),
+      db.importedLeads.count(),
     ])
-    setCounts({ leads, results, jobs })
+    setCounts({ leads, results, jobs, sessions, scraped, imported })
   }
 
   useEffect(() => {
@@ -226,6 +229,11 @@ export default function BackupRestoreSection() {
       {/* Local counts */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
         <h3 className="text-sm font-semibold text-white">Local Cache (IndexedDB)</h3>
+        <p className="text-xs text-gray-500 -mt-2">
+          This data lives in the browser's own storage for the extension — it survives
+          extension reloads, updates, and browser restarts. Only "Clear All Local Data"
+          below, or uninstalling the extension, removes it.
+        </p>
         <div className="grid grid-cols-3 gap-3 text-center text-xs text-gray-500">
           <div className="bg-gray-800 rounded-lg px-3 py-2.5">
             <div className="text-lg font-bold text-white">{counts.leads}</div>
@@ -239,6 +247,18 @@ export default function BackupRestoreSection() {
             <div className="text-lg font-bold text-white">{counts.jobs}</div>
             <div className="mt-0.5">Research Jobs</div>
           </div>
+          <div className="bg-gray-800 rounded-lg px-3 py-2.5">
+            <div className="text-lg font-bold text-white">{counts.sessions}</div>
+            <div className="mt-0.5">Sessions</div>
+          </div>
+          <div className="bg-gray-800 rounded-lg px-3 py-2.5">
+            <div className="text-lg font-bold text-white">{counts.scraped}</div>
+            <div className="mt-0.5">Scraped Leads</div>
+          </div>
+          <div className="bg-gray-800 rounded-lg px-3 py-2.5">
+            <div className="text-lg font-bold text-white">{counts.imported}</div>
+            <div className="mt-0.5">Imported Leads</div>
+          </div>
         </div>
       </div>
 
@@ -249,9 +269,10 @@ export default function BackupRestoreSection() {
         <div>
           <h3 className="text-sm font-semibold text-white">Sync from Database</h3>
           <p className="text-xs text-gray-500 mt-1">
-            Pulls the current state of MSSQL and rebuilds local data to match.
-            If MSSQL is empty, local data is cleared too.
-            <span className="text-blue-400"> MSSQL is the source of truth.</span>
+            Pulls sessions and leads from MSSQL and <span className="text-blue-400">merges</span> them
+            into local data by matching ID — existing local data is never deleted, only
+            updated or added to. Safe to click any time, including on an empty local cache
+            (e.g. a second device) or a database that's currently empty.
           </p>
         </div>
         <button
