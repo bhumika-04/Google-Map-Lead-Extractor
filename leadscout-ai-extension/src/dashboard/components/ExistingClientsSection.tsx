@@ -4,6 +4,7 @@ import { normalizeLeadName } from '@/utils/dedupe'
 import { normalizePhone } from '@/utils/normalize'
 import { nowISO } from '@/utils/date'
 import { toast } from '@/state/useToastStore'
+import { confirmDialog } from '@/state/useConfirmStore'
 import { activityLogRepository } from '@/db/activityLogRepository'
 import {
   uploadExistingClientsBatch,
@@ -205,7 +206,7 @@ export default function ExistingClientsSection() {
   }
 
   async function handleDelete(client: ExistingClient) {
-    if (!confirm(`Remove ${client.companyName} from the existing-clients list? Outreach to them will no longer be blocked.`)) return
+    if (!await confirmDialog(`Remove ${client.companyName} from the existing-clients list? Outreach to them will no longer be blocked.`, { danger: true, confirmLabel: 'Remove' })) return
     if (client.mssqlId) await deleteExistingClient(client.mssqlId)
     if (client.id) await existingClientRepository.delete(client.id)
     await refresh()

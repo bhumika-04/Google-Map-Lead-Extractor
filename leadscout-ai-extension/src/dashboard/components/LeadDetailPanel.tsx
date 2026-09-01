@@ -4,6 +4,7 @@ import { useLeadStore } from '@/state/useLeadStore'
 import { activityLogRepository } from '@/db/activityLogRepository'
 import { addToResearchQueue } from '@/services/futureResearchService'
 import { toast } from '@/state/useToastStore'
+import { confirmDialog } from '@/state/useConfirmStore'
 import { formatDateTime } from '@/utils/date'
 import { calculateLeadScore, scoreLabel, scoreColor } from '@/utils/leadScore'
 import { leadRepository } from '@/db/leadRepository'
@@ -99,7 +100,7 @@ export default function LeadDetailPanel() {
 
   async function handleDelete() {
     if (!detailLead?.id) return
-    if (!confirm(`Delete "${detailLead.companyName}"?`)) return
+    if (!await confirmDialog(`Delete "${detailLead.companyName}"?`, { danger: true, confirmLabel: 'Delete' })) return
     await deleteLead(detailLead.id)
     toast.info(`${detailLead.companyName} deleted`)
     closeDetail()

@@ -3,6 +3,7 @@ import { importedLeadRepo } from '@/db/pipelineLeadRepository'
 import { sessionRepository } from '@/db/sessionRepository'
 import { saveStatusToSql } from '@/services/pipelineSyncService'
 import { toast } from '@/state/useToastStore'
+import { confirmDialog } from '@/state/useConfirmStore'
 import { MSG } from '@/types/messages'
 import PipelineControl from './PipelineControl'
 import type { ImportedLead } from '@/types/pipelineLead'
@@ -74,7 +75,8 @@ export default function ImportedLeadsTable({ mode }: { mode: Mode }) {
   }
 
   async function remove(l: ImportedLead) {
-    if (!l.id || !confirm(`Delete "${l.companyName}"?`)) return
+    if (!l.id) return
+    if (!await confirmDialog(`Delete "${l.companyName}"?`, { danger: true, confirmLabel: 'Delete' })) return
     await importedLeadRepo.delete(l.id)
     load()
   }

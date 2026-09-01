@@ -5,6 +5,7 @@ import { nowISO } from '@/utils/date'
 import { clearAllLocalData } from '@/services/backupSyncService'
 import { isApiAvailable } from '@/services/sqlSyncService'
 import { restoreFromNewSchema } from '@/services/restoreService'
+import { confirmDialog } from '@/state/useConfirmStore'
 
 import { API_BASE as API, getApiBase, setApiBase, DEFAULT_API_BASE } from '@/config/api'
 
@@ -93,7 +94,7 @@ export default function BackupRestoreSection() {
 
   // ── Clear all local data ────────────────────────────────────────────────────
   async function handleClearAll() {
-    if (!confirm('This will delete ALL local leads and research data. The MSSQL database is NOT affected. Continue?')) return
+    if (!await confirmDialog('This will delete ALL local leads and research data. The MSSQL database is NOT affected. Continue?', { danger: true, confirmLabel: 'Delete all' })) return
     setClearing(true)
     try {
       await clearAllLocalData()

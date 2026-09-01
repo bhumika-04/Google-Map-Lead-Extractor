@@ -10,6 +10,7 @@ import { syncDerivedLeads } from '@/services/derivedLeadsService'
 import { updateSearchRunInSql } from '@/services/sqlSyncService'
 import { useLeadStore } from '@/state/useLeadStore'
 import { toast } from '@/state/useToastStore'
+import { confirmDialog } from '@/state/useConfirmStore'
 import { MSG } from '@/types/messages'
 import { COUNTRIES, flag } from './SearchConsole'
 import { timeAgo } from '@/utils/date'
@@ -140,7 +141,7 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
 
   async function clearToGlobalProfile() {
     if (!project?.id) return
-    if (!confirm('Clear this session\'s custom ICP and use the global business profile (from appsettings.json) instead?')) return
+    if (!await confirmDialog('Clear this session\'s custom ICP and use the global business profile (from appsettings.json) instead?', { confirmLabel: 'Clear ICP' })) return
     await searchProjectRepository.update(project.id, { businessProfile: '' })
     if (project.mssqlRunId !== undefined) updateSearchRunInSql(project.mssqlRunId, { businessProfile: '' }).catch(() => {})
     setProject({ ...project, businessProfile: '' })
@@ -151,7 +152,7 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     enrichment: 'enrichment', validation: 'validation', research: 'research queuing',
   }
   async function runStep(step: 'enrichment' | 'validation' | 'research') {
-    if (!confirm(`Re-run ${STEP_LABEL[step]} for this session? Leads already past this step will be reprocessed.`)) return
+    if (!await confirmDialog(`Re-run ${STEP_LABEL[step]} for this session? Leads already past this step will be reprocessed.`, { confirmLabel: 'Re-run' })) return
     await chrome.runtime.sendMessage({ type: MSG.PIPELINE_RUN_STEP, payload: { projectId, step, force: true } }).catch(() => {})
     toast.info(`Re-running ${STEP_LABEL[step]}…`)
   }

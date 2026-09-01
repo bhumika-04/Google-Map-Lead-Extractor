@@ -3,6 +3,7 @@ import { MSG } from '@/types/messages'
 import type { BatchCampaign, BatchCampaignCity } from '@/types/batchCampaign'
 import { createCampaign, getAllCampaigns, deleteCampaign } from '@/services/batchCampaignService'
 import { toast } from '@/state/useToastStore'
+import { confirmDialog } from '@/state/useConfirmStore'
 import { useSettingsStore } from '@/state/useSettingsStore'
 import { timeAgo } from '@/utils/date'
 import { COUNTRIES, flag, CityMultiSelect } from './SearchConsole'
@@ -129,7 +130,7 @@ export default function BatchCampaignPanel() {
   }
 
   async function handleDelete(id: number) {
-    if (!confirm('Delete this campaign record?')) return
+    if (!await confirmDialog('Delete this campaign record?', { danger: true, confirmLabel: 'Delete' })) return
     await deleteCampaign(id)
     toast.success('Campaign deleted')
     await refresh()

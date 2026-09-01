@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { MSG } from '@/types/messages'
 import { toast } from '@/state/useToastStore'
+import { confirmDialog } from '@/state/useConfirmStore'
 
 // Background pipeline (enrichment → validation → research) status + controls,
 // read from persisted storage so it's accurate on ANY page even after the worker
@@ -64,7 +65,7 @@ export default function PipelineControl({ projectId }: { projectId?: number }) {
   const stop = async () => { await send(MSG.PIPELINE_STOP); toast.info('Pipeline stop requested') }
   const cont = async () => { await send(MSG.PIPELINE_RUN, { projectId, force: false }); toast.info('Continuing pipeline…') }
   const rerun = async () => {
-    if (!confirm('Re-run the whole pipeline for this session? Every lead will be re-enriched and re-validated.')) return
+    if (!await confirmDialog('Re-run the whole pipeline for this session? Every lead will be re-enriched and re-validated.', { confirmLabel: 'Re-run' })) return
     await send(MSG.PIPELINE_RUN, { projectId, force: true }); toast.info('Re-running pipeline…')
   }
 

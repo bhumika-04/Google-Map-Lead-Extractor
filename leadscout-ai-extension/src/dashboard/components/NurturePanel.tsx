@@ -5,6 +5,7 @@ import {
 } from '@/services/nurtureService'
 import type { NurtureTemplate, NurtureSequenceItem } from '@/services/nurtureService'
 import { toast } from '@/state/useToastStore'
+import { confirmDialog } from '@/state/useConfirmStore'
 import { CHANNEL_META } from '@/services/outreachService'
 import { exportRowsToCSV, type ExportRowInput } from '@/utils/csvExport'
 
@@ -104,7 +105,7 @@ export default function NurturePanel() {
   }
 
   async function handleDelete(id: string) {
-    if (!confirm('Delete this template?')) return
+    if (!await confirmDialog('Delete this template?', { danger: true, confirmLabel: 'Delete' })) return
     const r = await deleteTemplate(id)
     if (r.ok) { toast.success('Deleted'); await loadTemplates() }
     else toast.error('Delete failed')

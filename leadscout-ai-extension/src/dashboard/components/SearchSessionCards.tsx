@@ -4,6 +4,7 @@ import type { SearchProject } from '@/types/searchProject'
 import { searchProjectRepository } from '@/db/searchProjectRepository'
 import { db } from '@/db/db'
 import { toast } from '@/state/useToastStore'
+import { confirmDialog } from '@/state/useConfirmStore'
 import { updateSearchRunInSql } from '@/services/sqlSyncService'
 import { flag } from './SearchConsole'
 
@@ -104,10 +105,11 @@ export default function SearchSessionCards({ onOpenWorkspace }: { onNavigate: (s
 
   async function handleDelete(project: SearchProject) {
     const c = counts.get(project.id!) ?? EMPTY_COUNTS
-    const ok = confirm(
+    const ok = await confirmDialog(
       `Delete session "${project.name}"?\n\n` +
       `Its ${c.captured} leads are NOT deleted — they move to "Unassigned".\n` +
-      `Only the session card and its ICP profile are removed.`
+      `Only the session card and its ICP profile are removed.`,
+      { danger: true, confirmLabel: 'Delete session' }
     )
     if (!ok) return
     await searchProjectRepository.delete(project.id!)

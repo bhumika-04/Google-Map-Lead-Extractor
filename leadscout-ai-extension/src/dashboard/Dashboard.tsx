@@ -7,6 +7,8 @@ import ProgressCards from './components/ProgressCards'
 import ImportedLeadsTable from './components/ImportedLeadsTable'
 import ActivityLogPanel from './components/ActivityLogPanel'
 import ToastContainer from './components/Toast'
+import ConfirmDialog from './components/ConfirmDialog'
+import { confirmDialog } from '@/state/useConfirmStore'
 import LeadDetailPanel from './components/LeadDetailPanel'
 import ImportPanel from './components/ImportPanel'
 import ExistingClientsSection from './components/ExistingClientsSection'
@@ -216,6 +218,7 @@ export default function Dashboard() {
       </div>
 
       <ToastContainer />
+      <ConfirmDialog />
     </div>
   )
 }
@@ -236,7 +239,7 @@ function OverviewSection({ onNavigate }: { onNavigate: (s: NavSection) => void }
   const maxSessionLeads = sessions.reduce((m, s) => Math.max(m, s.totalCaptured), 1)
 
   async function handleDeleteSession(id: number) {
-    if (!confirm('Delete this session and all its leads?')) return
+    if (!await confirmDialog('Delete this session and all its leads?', { danger: true, confirmLabel: 'Delete' })) return
     await leadRepository.deleteBySession(id)
     await searchSessionRepository.delete(id)
     await loadSessions()
