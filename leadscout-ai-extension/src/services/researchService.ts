@@ -4,8 +4,6 @@ import { sourcePageRepository } from '@/db/sourcePageRepository'
 import { leadRepository } from '@/db/leadRepository'
 import { searchProjectRepository } from '@/db/searchProjectRepository'
 import { activityLogRepository } from '@/db/activityLogRepository'
-import { saveResearchToSql } from './sqlSyncService'
-import { savePhase3Data } from './apiResearchService'
 import { runGoogleSearchEvidence, isGoogleEvidenceBlocked } from './googleEvidenceService'
 import { scrapeGoogleAiCompany } from './googleAiScraper'
 import { classifyUrl } from './linkClassifier'
@@ -370,13 +368,6 @@ export async function processNextJob(config: ResearchServiceConfig): Promise<boo
 
     console.log(`${tag} 💾 Step 5: Saving research result | confidence: ${((merged.confidence ?? 0) * 100).toFixed(0)}%`)
     await researchResultRepository.create(resultData)
-
-    saveResearchToSql(lead, resultData).catch(() => {})
-
-    if (lead.mssqlId) {
-      console.log(`${tag} 🗄️ Syncing Phase 3 data to MSSQL (mssqlId: ${lead.mssqlId})`)
-      savePhase3Data(lead.mssqlId, evidence, sourcePages, companyResearchData).catch(() => {})
-    }
 
     await researchJobRepository.updateStatus(job.id, 'completed', {
       completedAt: nowISO(),

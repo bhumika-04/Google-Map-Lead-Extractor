@@ -5,7 +5,7 @@ import { searchProjectRepository } from '@/db/searchProjectRepository'
 import { db } from '@/db/db'
 import { toast } from '@/state/useToastStore'
 import { confirmDialog } from '@/state/useConfirmStore'
-import { updateSearchRunInSql } from '@/services/sqlSyncService'
+import { updateSessionInSql } from '@/services/pipelineSyncService'
 import { flag } from './SearchConsole'
 
 // Session cards shown below the Search Console — one card per search run,
@@ -91,13 +91,13 @@ export default function SearchSessionCards({ onOpenWorkspace }: { onNavigate: (s
     setRenamingId(null)
     if (!name || name === project.name) return
     await searchProjectRepository.rename(project.id!, name)
-    if (project.mssqlRunId !== undefined) updateSearchRunInSql(project.mssqlRunId, { name }).catch(() => {})
+    if (project.newSessionMssqlId !== undefined) updateSessionInSql(project.newSessionMssqlId, { name }).catch(() => {})
     load()
   }
 
   async function saveProfile(project: SearchProject) {
     await searchProjectRepository.update(project.id!, { businessProfile: profileValue })
-    if (project.mssqlRunId !== undefined) updateSearchRunInSql(project.mssqlRunId, { businessProfile: profileValue }).catch(() => {})
+    if (project.newSessionMssqlId !== undefined) updateSessionInSql(project.newSessionMssqlId, { businessProfile: profileValue }).catch(() => {})
     setProfileId(null)
     toast.success('Session ICP updated — used for this session’s next validation & research')
     load()

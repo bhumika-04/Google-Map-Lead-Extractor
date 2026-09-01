@@ -11,7 +11,7 @@ import { leadRepository } from '@/db/leadRepository'
 import { searchProjectRepository } from '@/db/searchProjectRepository'
 import { activityLogRepository } from '@/db/activityLogRepository'
 import { validateLeads, DailyQuotaExhaustedError } from './leadValidationService'
-import { saveValidationBulkToSql, saveIcpBulkToSql, resolveAiCredentials } from './sqlSyncService'
+import { resolveAiCredentials } from './sqlSyncService'
 import { addToResearchQueue } from './futureResearchService'
 import { runPreValidationEnrichment } from './preValidationEnrichmentService'
 import { reconcileScrapedForLeads } from './scrapedReconcileService'
@@ -197,27 +197,10 @@ export async function runAutoValidationAndResearch(
   const notRelevant = results.filter((r) => !r.relevant)
   // (Validation + ICP scores were already persisted per chunk above.)
 
-  // Mirror validation/ICP into the new scraped_leads (local + new MSSQL).
+  // Mirror validation/ICP into the new scraped_leads — this is also what
+  // pushes the result to MSSQL (via saveValidationBulkToSql in
+  // pipelineSyncService.ts, /api/leads/{kind}/validate-bulk).
   reconcileScrapedForLeads(freshLeads, 'validation').catch(() => {})
-
-  // Sync to MSSQL
-  const allTouched = await Promise.all(results.map((r) => leadRepository.getById(r.leadId)))
-  const relevantIdSet = new Set(relevant.map(r => r.leadId))
-  saveValidationBulkToSql(
-    allTouched
-      .filter((l): l is NonNullable<typeof l> => !!l?.mssqlId)
-      .map((l) => ({ mssqlId: l.mssqlId!, status: relevantIdSet.has(l.id!) ? 'selected' as const : 'not_relevant' as const }))
-  ).catch(() => {})
-  saveIcpBulkToSql(
-    allTouched
-      .filter((l): l is NonNullable<typeof l> => !!l?.mssqlId && l.icpScore !== undefined)
-      .map((l) => ({
-        mssqlId: l.mssqlId!, icpScore: l.icpScore!, icpStatus: l.icpStatus ?? 'hold',
-        icpReason: l.icpReason ?? '', icpScoreBreakdown: l.icpScoreBreakdown,
-        teamSize: l.teamSize, annualTurnover: l.annualTurnover,
-        industry: l.industry, companyType: l.companyType, decisionMaker: l.decisionMaker,
-      }))
-  ).catch(() => {})
 
   onPhaseChange?.('validation_completed')
 
@@ -369,24 +352,6 @@ export async function runPipelineStep(
     if (results.length === 0) return { processed: 0, message: 'Validation stopped before any results' }
 
     reconcileScrapedForLeads(targets, 'validation').catch(() => {})
-
-    const allTouched = await Promise.all(results.map((r) => leadRepository.getById(r.leadId)))
-    const relevantIdSet = new Set(results.filter((r) => r.relevant).map((r) => r.leadId))
-    saveValidationBulkToSql(
-      allTouched
-        .filter((l): l is NonNullable<typeof l> => !!l?.mssqlId)
-        .map((l) => ({ mssqlId: l.mssqlId!, status: relevantIdSet.has(l.id!) ? 'selected' as const : 'not_relevant' as const }))
-    ).catch(() => {})
-    saveIcpBulkToSql(
-      allTouched
-        .filter((l): l is NonNullable<typeof l> => !!l?.mssqlId && l.icpScore !== undefined)
-        .map((l) => ({
-          mssqlId: l.mssqlId!, icpScore: l.icpScore!, icpStatus: l.icpStatus ?? 'hold',
-          icpReason: l.icpReason ?? '', icpScoreBreakdown: l.icpScoreBreakdown,
-          teamSize: l.teamSize, annualTurnover: l.annualTurnover,
-          industry: l.industry, companyType: l.companyType, decisionMaker: l.decisionMaker,
-        }))
-    ).catch(() => {})
 
     const relevantCount = results.filter((r) => r.relevant).length
     const msg = `Validation done — ${results.length} scored, ${relevantCount} relevant`

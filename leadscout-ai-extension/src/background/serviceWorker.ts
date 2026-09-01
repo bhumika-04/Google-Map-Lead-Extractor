@@ -21,7 +21,7 @@ import { processNextJob } from '@/services/researchService'
 import { sweepOrphanScraperTabs } from '@/services/socialScraper'
 import { addToResearchQueue } from '@/services/futureResearchService'
 import { discoverLeads } from '@/services/directoryDiscovery'
-import { syncToSql, isApiAvailable, fetchApiConfig, restoreFromSql, saveLeadBatchToSql, saveValidationBulkToSql, createSearchRunInSql, updateSearchRunInSql, fetchSearchRuns } from '@/services/sqlSyncService'
+import { fetchApiConfig } from '@/services/sqlSyncService'
 import { pushBackup } from '@/services/backupSyncService'
 import { runAutoValidationAndResearch, runPipelineStep } from '@/services/autoPipelineService'
 // Dual-write to the redesigned schema (sessions + scrapedLeads) — mirrors capture
@@ -399,22 +399,13 @@ async function handleSearchStart(payload: SearchStartPayload, senderTabId?: numb
 
   await log('maps_tab_opened', `Maps tab opened: ${payload.mapsUrl}`, payload.sessionId)
 
-  // Resolve the Search Session (project) this capture belongs to. The MSSQL
-  // run id is created lazily here if the API was down when the project was
-  // created, so lead batch saves can always carry their run tag.
+  // Resolve the Search Session (project) this capture belongs to.
   let mssqlRunId: number | undefined
   let scrapedSessionId: number | undefined
   let scrapedSessionMssqlId: number | undefined
   if (payload.projectId !== undefined) {
     const project = await searchProjectRepository.getById(payload.projectId).catch(() => undefined)
     if (project) {
-      if (project.mssqlRunId === undefined) {
-        const runId = await createSearchRunInSql(project).catch(() => null)
-        if (runId !== null) {
-          await searchProjectRepository.update(project.id!, { mssqlRunId: runId }).catch(() => {})
-          project.mssqlRunId = runId
-        }
-      }
       mssqlRunId = project.mssqlRunId
 
       // Dual-write: ensure a redesigned-schema `session` mirrors this project, so
@@ -547,25 +538,12 @@ async function handleLeadFound(payload: LeadFoundPayload) {
       }
     }
 
-    // Save to MSSQL every 10 leads — direct DB write, not just a backup
-    if (session.totalCaptured % 10 === 0) {
-      const recentLeads = await leadRepository.getByFilter({ sessionId: session.sessionId })
-      saveLeadBatchToSql(session.city, session.keyword, recentLeads.map((l) => ({
-        id: l.id!, companyName: l.companyName, address: l.address, phone: l.phone,
-        website: l.website, googleMapsUrl: l.googleMapsUrl, rating: l.rating,
-        reviewCount: l.reviewCount, category: l.category, city: l.city,
-      })), session.mssqlRunId).catch(() => {
-        // Surface this in Activity Logs — silent MSSQL sync failures during a
-        // long capture session are exactly what caused a prior data-loss incident.
-        log('system', `⚠️ MSSQL batch save failed at ${session.totalCaptured} leads — will retry next batch. Data is still safe in the local JSON backup.`, session.sessionId).catch(() => {})
-      })
-    }
-
     // Independent full-snapshot safety net — pushes ALL local data (not just this
-    // session) to /api/extension-backup as a JSON blob, separate from the MSSQL
-    // 'companies' table. Survives even if the MSSQL sync above is failing, and
-    // survives a DELETE FROM companies (different storage entirely). Runs every
-    // 25 leads — infrequent enough to not add capture overhead.
+    // session) to /api/extension-backup as a JSON blob. The per-lead MSSQL sync
+    // for this session lives in the dual-write mirror above (scrapedLeadRepo /
+    // savePipelineBatchToSql), which targets the current schema's
+    // /api/leads/{kind}/save-batch. Runs every 25 leads — infrequent enough to
+    // not add capture overhead.
     if (session.totalCaptured % 25 === 0) {
       pushBackup().catch(() => {})
     }
@@ -589,343 +567,14 @@ async function handleLeadFound(payload: LeadFoundPayload) {
   })
 }
 
-// ─── MSSQL → IndexedDB sync (MSSQL is single source of truth) ────────────────
-// UPSERTs leads — never clears the local table.
-// Existing leads are matched by mssqlId (preferred) or normalizedName — their
-// IndexedDB IDs are preserved so researchResults/researchJobs stay linked.
-// New leads from MSSQL that don't exist locally are inserted.
-// Research results are restored from full_result_json if the lead has no result yet.
-
-async function syncLeadsFromMssql(): Promise<{ synced: number }> {
-  const available = await isApiAvailable()
-  if (!available) return { synced: 0 }
-
-  const data = await restoreFromSql()
-  if (!data?.companies?.length) {
-    await log('system', 'MSSQL sync: API returned empty — local data unchanged')
-    return { synced: 0 }
-  }
-
-  // ── Step 0: status ranking (used by the rank-guarded status merge below) ────
-  const STATUS_RANK: Record<string, number> = {
-    research_completed: 4,
-    research_failed: 3, research_running: 3, research_pending: 3, selected: 3,
-    rejected: 2, new: 1,
-  }
-  const allLeads = await leadRepository.getAll()
-
-  // IMPORTANT: the reload sync is intentionally NON-DESTRUCTIVE — it only
-  // UPSERTs/inserts, it must NEVER delete local leads.
-  //
-  // This path used to run a "Step 0 dedup" that grouped ALL local leads by
-  // normalizedName+city (across every Search Session) and DELETED the extras on
-  // every dashboard open. That silently wiped legitimately-separate leads — e.g.
-  // the same company captured under two different sessions/keywords, or leads that
-  // had not yet synced to MSSQL — turning a ~1,700-lead capture into ~800 after a
-  // reload. Capture already dedupes within a session at save time (findCandidatesForDedupe
-  // + isDuplicate + mergeLeadData), and the new Search Session model deliberately keeps
-  // different runs separate, so collapsing across sessions here is both wrong and lossy.
-  // Deduplication, if ever wanted, must be an explicit user action — not a silent
-  // side effect of opening the dashboard.
-  const deletedLocalIds = new Set<number>()
-  const dedupedCount = 0
-
-  // Build lookup maps: mssqlId → lead and (normalizedName|city) → lead
-  const existingLeads = allLeads.filter(l => l.id && !deletedLocalIds.has(l.id))
-  const byMssqlId    = new Map<string, Lead>()
-  const byNameCity   = new Map<string, Lead>()
-  for (const l of existingLeads) {
-    if (l.mssqlId) byMssqlId.set(l.mssqlId, l)
-    byNameCity.set(`${l.normalizedName}|${(l.city ?? '').toLowerCase()}`, l)
-  }
-
-  // ── Rebuild Search Sessions from MSSQL search_runs ──────────────────────────
-  // Companies carry run_id; recreate any session missing locally (reinstall /
-  // cleared IndexedDB) so restored leads land back in their own workspace
-  // instead of all collapsing into "Unassigned".
-  const remoteRuns = await fetchSearchRuns()
-  const localProjects = await searchProjectRepository.getAll().catch(() => [])
-  const runToLocalProject = new Map<number, number>()
-  // Also index existing sessions by name+country so a remote run that isn't
-  // linked by id can be matched to an existing local session and LINKED, rather
-  // than spawning a phantom empty "0 keyword / 0 city" duplicate card. This both
-  // heals orphaned runs from the old double-create race and keeps genuine
-  // restores (after a data wipe) working.
-  const nameCountryKey = (name?: string, country?: string) =>
-    `${(name ?? '').trim().toLowerCase()}|${(country ?? '').toLowerCase()}`
-  const projectByNameCountry = new Map<string, { id: number; mssqlRunId?: number }>()
-  for (const p of localProjects) {
-    if (p.mssqlRunId !== undefined && p.id) runToLocalProject.set(p.mssqlRunId, p.id)
-    if (p.id) {
-      const key = nameCountryKey(p.name, p.country)
-      if (!projectByNameCountry.has(key)) projectByNameCountry.set(key, { id: p.id, mssqlRunId: p.mssqlRunId })
-    }
-  }
-  let projectsRestored = 0
-  for (const r of remoteRuns) {
-    if (runToLocalProject.has(r.id)) continue
-
-    // A local session with the same name+country already exists — link this run
-    // to it instead of creating a duplicate card.
-    const key = nameCountryKey(r.name, r.country)
-    const existing = projectByNameCountry.get(key)
-    if (existing) {
-      runToLocalProject.set(r.id, existing.id)
-      if (existing.mssqlRunId === undefined) {
-        await searchProjectRepository.update(existing.id, { mssqlRunId: r.id }).catch(() => {})
-        existing.mssqlRunId = r.id
-      }
-      continue
-    }
-
-    // Genuinely new (e.g. leads restored after a local wipe) — recreate the session.
-    try {
-      const pid = await searchProjectRepository.create({
-        name: r.name,
-        country: r.country ?? 'IN',
-        keywords: [],
-        cities: [],
-        businessProfile: r.businessProfile ?? '',
-        status: r.status === 'running' ? 'running' : r.status === 'stopped' ? 'stopped' : 'completed',
-        totalTerms: 0,
-        completedTerms: 0,
-        totalLeads: r.totalLeads ?? 0,
-        source: 'search_console',
-        mssqlRunId: r.id,
-      })
-      runToLocalProject.set(r.id, pid)
-      projectByNameCountry.set(key, { id: pid, mssqlRunId: r.id })
-      projectsRestored++
-    } catch { /* skip */ }
-  }
-
-  // ── Heal existing phantom duplicate sessions ────────────────────────────────
-  // The old double-create race left orphan runs that the previous rebuild turned
-  // into empty "0 keyword / 0 city / 0 leads" duplicate cards. Remove any such
-  // empty session that (a) has no leads and (b) has a REAL same-name+country
-  // sibling (one with keywords or leads). SearchConsole always sets keywords, and
-  // a genuine post-wipe restore is the only session with its name — so this only
-  // ever deletes true phantoms. delete() un-assigns leads first, so no data loss.
-  const leadCountByProject = new Map<number, number>()
-  for (const l of allLeads) {
-    if (l.projectId !== undefined) {
-      leadCountByProject.set(l.projectId, (leadCountByProject.get(l.projectId) ?? 0) + 1)
-    }
-  }
-  let phantomsRemoved = 0
-  for (const p of localProjects) {
-    if (!p.id) continue
-    const isEmpty = (p.keywords?.length ?? 0) === 0 && (p.cities?.length ?? 0) === 0
-    if (!isEmpty || (leadCountByProject.get(p.id) ?? 0) > 0) continue
-    const hasRealSibling = localProjects.some((q) =>
-      q.id && q.id !== p.id &&
-      nameCountryKey(q.name, q.country) === nameCountryKey(p.name, p.country) &&
-      ((q.keywords?.length ?? 0) > 0 || (leadCountByProject.get(q.id) ?? 0) > 0)
-    )
-    if (hasRealSibling) {
-      await searchProjectRepository.delete(p.id).catch(() => {})
-      phantomsRemoved++
-    }
-  }
-  if (phantomsRemoved > 0) {
-    await log('sync', `Removed ${phantomsRemoved} phantom duplicate session${phantomsRemoved > 1 ? 's' : ''}`)
-  }
-
-  // Track mssqlId → IndexedDB leadId so we can link research results below
-  const mssqlToLocalId = new Map<string, number>()
-
-  // Local statuses that are AHEAD of MSSQL (the best-effort validation sync
-  // missed them, e.g. API was down during validation) get pushed back up to
-  // MSSQL after the loop instead of being silently downgraded locally.
-  const statusBackfill: Array<{ mssqlId: string; status: 'selected' | 'not_relevant' }> = []
-
-  let updated = 0, inserted = 0
-  for (const c of data.companies) {
-    // Map MSSQL statuses back to the extension's LeadStatus
-    const vs = (c.validationStatus ?? '').toLowerCase()
-    const es = (c.enrichmentStatus ?? '').toLowerCase()
-    let status: Lead['status'] = 'new'
-    if (vs === 'selected' || vs === 'relevant')          status = 'selected'
-    else if (vs === 'rejected' || vs === 'not_relevant') status = 'rejected'
-    else if (es === 'enriched' || es === 'completed')    status = 'research_completed'
-
-    const normName = (c.companyName ?? '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 80)
-    const nameCity = `${normName}|${(c.city ?? '').toLowerCase()}`
-
-    // Check if this lead already exists locally (by mssqlId first, then name+city)
-    const existing = byMssqlId.get(c.companyId) ?? byNameCity.get(nameCity)
-
-    const restoredTags: string[] | undefined =
-      c.tagsJson ? (() => { try { return JSON.parse(c.tagsJson) } catch { return undefined } })() : undefined
-
-    if (existing?.id) {
-      // UPDATE in place — preserve IndexedDB id so all linked records stay valid.
-      //
-      // Status merge is rank-guarded, never a blind overwrite: the validation
-      // status only reaches MSSQL best-effort, so a lead the user/AI already
-      // SELECTED locally can look like plain 'new' in MSSQL. The old code took
-      // MSSQL's word unconditionally and silently demoted selected leads back
-      // to 'new' on every dashboard open. Now the HIGHER-ranked status wins,
-      // and when local is ahead we backfill MSSQL instead.
-      //
-      // Repair: a lead validated relevant but sitting at 'new' was demoted by
-      // an earlier destructive sync — treat it as 'selected' again.
-      const effectiveLocal: Lead['status'] =
-        existing.status === 'new' && existing.validationStatus === 'relevant' ? 'selected' : existing.status
-      const localRank  = STATUS_RANK[effectiveLocal] ?? 0
-      const remoteRank = STATUS_RANK[status] ?? 0
-
-      if (remoteRank >= localRank) {
-        await leadRepository.updateStatus(existing.id, status)
-      } else {
-        if (effectiveLocal !== existing.status) {
-          await leadRepository.updateStatus(existing.id, effectiveLocal)
-        }
-        if (effectiveLocal === 'selected' || effectiveLocal.startsWith('research_')) {
-          statusBackfill.push({ mssqlId: c.companyId, status: 'selected' })
-        } else if (effectiveLocal === 'rejected') {
-          statusBackfill.push({ mssqlId: c.companyId, status: 'not_relevant' })
-        }
-      }
-      const metaUpdate: Record<string, unknown> = {}
-      if (!existing.mssqlId)        metaUpdate.mssqlId = c.companyId
-      if (c.notes && !existing.notes)     metaUpdate.notes = c.notes
-      if (restoredTags?.length && !existing.tags?.length) metaUpdate.tags = restoredTags
-      if (c.validationReason && !existing.validationReason) metaUpdate.validationReason = c.validationReason
-      if (existing.projectId === undefined && c.runId !== undefined && runToLocalProject.has(c.runId)) {
-        metaUpdate.projectId = runToLocalProject.get(c.runId)
-      }
-      if (Object.keys(metaUpdate).length) await db.leads.update(existing.id, metaUpdate)
-      mssqlToLocalId.set(c.companyId, existing.id)
-      updated++
-    } else {
-      // INSERT: company exists in MSSQL but not locally (e.g. after reinstall)
-      try {
-        const leadId = await leadRepository.create({
-          companyName:      c.companyName,
-          normalizedName:   normName,
-          address:          c.address,
-          phone:            c.phone,
-          website:          c.website,
-          googleMapsUrl:    c.googleMapsUrl,
-          rating:           c.rating,
-          reviewCount:      c.reviewCount,
-          category:         c.category,
-          city:             c.city,
-          keyword:          c.keyword ?? '',
-          searchQuery:      c.sessionName ?? '',
-          status,
-          capturedAt:       c.sessionCreatedAt ?? nowISO(),
-          updatedAt:        nowISO(),
-          confidence:       0.8,
-          sessionId:        0,
-          projectId:        c.runId !== undefined ? runToLocalProject.get(c.runId) : undefined,
-          source:           'sql_restore' as const,
-          mssqlId:          c.companyId,
-          notes:            c.notes,
-          tags:             restoredTags,
-          validationReason: c.validationReason,
-        })
-        mssqlToLocalId.set(c.companyId, leadId)
-        inserted++
-      } catch { /* skip on constraint violation */ }
-    }
-  }
-
-  // Restore research results for leads that don't already have one locally.
-  // This covers the "reinstall" case — MSSQL has the full AI result JSON saved earlier.
-  const existingResults = await researchResultRepository.getAll()
-  const leadsWithResult = new Set(existingResults.map(r => r.leadId))
-
-  let resultsRestored = 0
-  for (const e of data.enrichments ?? []) {
-    const localLeadId = mssqlToLocalId.get(e.companyId)
-    if (!localLeadId || leadsWithResult.has(localLeadId)) continue
-
-    if (e.fullResultJson) {
-      try {
-        const full = JSON.parse(e.fullResultJson)
-        // Strip the old IndexedDB id — let the DB assign a new one
-        delete full.id
-        full.leadId = localLeadId
-        await researchResultRepository.create(full)
-        resultsRestored++
-        continue
-      } catch { /* fall through to basic restore */ }
-    }
-
-    // Fallback: restore from individual columns (used when fullResultJson is absent — older records)
-    const parseJsonField = (v: unknown): unknown[] | undefined => {
-      if (!v) return undefined
-      try { const p = JSON.parse(v as string); return Array.isArray(p) ? p : undefined } catch { return undefined }
-    }
-    try {
-      await researchResultRepository.create({
-        leadId:                localLeadId,
-        jobId:                 0,
-        email:                 e.email                ?? undefined,
-        website:               e.website               ?? undefined,
-        alternatePhone:        e.alternatePhone        ?? undefined,
-        whatsapp:              e.whatsapp              ?? undefined,
-        linkedIn:              e.linkedIn              ?? undefined,
-        facebook:              e.facebook              ?? undefined,
-        instagram:             e.instagram             ?? undefined,
-        youtube:               e.youtube               ?? undefined,
-        twitter:               e.twitter               ?? undefined,
-        decisionMaker:         e.decisionMaker         ?? undefined,
-        decisionMakerLinkedIn: e.decisionMakerLinkedIn ?? undefined,
-        industry:              e.industry              ?? undefined,
-        tagline:               e.tagline               ?? undefined,
-        summary:               e.summary               ?? undefined,
-        supplierBuyerType:     e.supplierBuyerType     ?? undefined,
-        employeeCount:         e.employeeCount         ?? undefined,
-        yearFounded:           e.yearFounded ? parseInt(e.yearFounded) : undefined,
-        companyType:           e.companyType           ?? undefined,
-        annualTurnover:        e.annualTurnover        ?? undefined,
-        headquarters:          e.headquarters          ?? undefined,
-        confidence:            e.confidence            ?? 0.5,
-        createdAt:             e.enrichedAt            ?? nowISO(),
-        teamMembers:           parseJsonField(e.teamMembersJson),
-        certifications:        parseJsonField(e.certificationsJson),
-        majorClients:          parseJsonField(e.majorClientsJson),
-        expansionSignals:      parseJsonField(e.expansionSignalsJson),
-        currentSoftware:       parseJsonField(e.currentSoftwareJson),
-        exportMarkets:         parseJsonField(e.exportMarketsJson),
-        painPoints:            parseJsonField(e.painPointsJson),
-        services:              parseJsonField(e.servicesJson),
-      } as any)
-      resultsRestored++
-    } catch { /* skip */ }
-  }
-
-  // Restore DeepResearch records (GAP D1 fix) — data is in MSSQL but was never synced back to IDB.
-  let deepRestoredCount = 0
-  if (data.deepResearch?.length) {
-    const existingDR = await db.deepResearch.toArray()
-    const leadsWithDR = new Set(existingDR.map(dr => dr.leadId))
-    for (const dr of data.deepResearch) {
-      const localLeadId = mssqlToLocalId.get(dr.companyId)
-      if (!localLeadId || leadsWithDR.has(localLeadId)) continue
-      if (!dr.fullDeepResearchJson) continue
-      try {
-        const full = JSON.parse(dr.fullDeepResearchJson)
-        delete full.id
-        full.leadId = localLeadId
-        await db.deepResearch.add(full)
-        deepRestoredCount++
-      } catch { /* skip malformed JSON */ }
-    }
-  }
-
-  // Push locally-ahead statuses up to MSSQL so both sides converge without
-  // ever losing a selection. Best-effort — retried on the next sync if it fails.
-  if (statusBackfill.length > 0) {
-    saveValidationBulkToSql(statusBackfill).catch(() => {})
-  }
-
-  await log('system', `MSSQL sync: ${dedupedCount} duplicates removed, ${updated} updated, ${inserted} new leads, ${statusBackfill.length} local statuses kept & pushed to MSSQL, ${projectsRestored} sessions restored, ${resultsRestored} research results restored, ${deepRestoredCount} deep research restored`)
-  return { synced: updated + inserted }
-}
+// syncLeadsFromMssql() was removed — it was a ~330-line function guaranteed to
+// return immediately on every call, because it checked `data?.companies?.length`
+// against a response shape (`{ companies, enrichments, deepResearch }`) that
+// /api/restore has not returned since the schema redesign (it now returns
+// `{ sessions, scrapedLeads, importedLeads }`). Every dashboard open and every
+// fresh install fired this dead round-trip for nothing. The real sync-down path
+// is restoreFromNewSchema() (src/services/restoreService.ts), triggered
+// explicitly from Backup & Restore -> "Sync from Database".
 
 async function handleCaptureFinished(payload: CaptureFinishedPayload) {
   const session = activeSession
@@ -964,9 +613,6 @@ async function handleCaptureFinished(payload: CaptureFinishedPayload) {
     status:            reason === 'stopped' ? 'stopped' : 'completed',
     message:           statusMsg,
   })
-
-  // Sync session to MSSQL — fire and forget
-  syncSessionToSql(session.sessionId, session.city, session.keyword, session.totalCaptured).catch(() => {})
 
   // Advance the batch campaign if one is running. We pass session.mapsTabId explicitly
   // because activeSession is already null at this point — advanceBatchCampaign needs
@@ -1057,67 +703,6 @@ async function handleBackgroundDiscover(keyword: string, city: string, autoResea
     `Background discovery found ${leads.length}, saved ${saved} new leads from ${sources.join(', ')}`)
 
   return { found: leads.length, saved, sources }
-}
-
-async function syncSessionToSql(sessionId: number, city: string, keyword: string, totalCaptured: number) {
-  const available = await isApiAvailable()
-  if (!available) return  // Local API not running — skip silently
-
-  const leads = await leadRepository.getByFilter({ sessionId })
-  const allResults = await researchResultRepository.getAll()
-  const sessionResultLeadIds = new Set(leads.map((l) => l.id!))
-  const researchResults = allResults.filter((r) => sessionResultLeadIds.has(r.leadId))
-
-  const result = await syncToSql(
-    { city, keyword, totalCaptured },
-    leads.map((l) => ({
-      id: l.id!,
-      companyName: l.companyName,
-      address: l.address,
-      phone: l.phone,
-      website: l.website,
-      googleMapsUrl: l.googleMapsUrl,
-      rating: l.rating,
-      reviewCount: l.reviewCount,
-      category: l.category,
-      city: l.city,
-    })),
-    researchResults.map((r) => ({
-      leadId:        r.leadId,
-      decisionMaker: r.decisionMaker,
-      email:         r.email,
-      website:       r.website,
-      linkedIn:      r.linkedIn,
-      facebook:      r.facebook,
-      instagram:     r.instagram,
-      youtube:       r.youtube,
-      summary:       r.summary,
-      services:      r.services,
-      employeeCount: r.employeeCount,
-      yearFounded:   r.yearFounded,
-      companyType:   r.companyType,
-      confidence:    r.confidence,
-      fullResultJson: JSON.stringify(r),  // GAP B1 fix: UpsertEnrichment now writes this
-    })),
-  )
-
-  // Write MSSQL UUIDs back to IndexedDB so OutreachPanel can load conversation history
-  if (result.ok && result.leadIdMap) {
-    for (const [indexedDbId, mssqlId] of Object.entries(result.leadIdMap)) {
-      const numId = parseInt(indexedDbId, 10)
-      if (!isNaN(numId) && mssqlId) {
-        await leadRepository.updateMany([numId], { mssqlId })
-      }
-    }
-  }
-
-  await activityLogRepository.log(
-    result.ok ? 'sql_sync_completed' : 'sql_sync_failed',
-    result.ok
-      ? `Synced ${result.synced} leads to MSSQL deeplead database`
-      : `MSSQL sync failed: ${result.error}`,
-    sessionId
-  )
 }
 
 // ─── Search Console queue ─────────────────────────────────────────────────────
@@ -1239,10 +824,6 @@ async function advanceSearchQueue(captured: number) {
     await clearSearchQueue()
     if (queue.projectId !== undefined) {
       await searchProjectRepository.setStatus(queue.projectId, 'completed').catch(() => {})
-      const project = await searchProjectRepository.getById(queue.projectId).catch(() => undefined)
-      if (project?.mssqlRunId !== undefined) {
-        updateSearchRunInSql(project.mssqlRunId, { status: 'completed', totalLeads: project.totalLeads }).catch(() => {})
-      }
     }
     await log('search_queue', `Search run completed — ${queue.terms.length} searches, ${queue.totalLeads} total leads`)
     broadcastProgress({
@@ -1329,10 +910,6 @@ async function advanceBatchCampaign(cityCaptured: number, completedMapsTabId: nu
     activeBatchCampaignId = null
     if (campaign.projectId !== undefined) {
       await searchProjectRepository.setStatus(campaign.projectId, 'completed').catch(() => {})
-      const project = await searchProjectRepository.getById(campaign.projectId).catch(() => undefined)
-      if (project?.mssqlRunId !== undefined) {
-        updateSearchRunInSql(project.mssqlRunId, { status: 'completed', totalLeads: project.totalLeads }).catch(() => {})
-      }
     }
     await log('batch_campaign', `Campaign "${campaign.keyword}" completed — ${totalCaptured} total leads`)
     chrome.tabs.remove(completedMapsTabId).catch(() => {})
@@ -1476,10 +1053,6 @@ async function handleCaptureStop() {
     await clearSearchQueue()
     if (queue.projectId !== undefined) {
       await searchProjectRepository.setStatus(queue.projectId, 'stopped').catch(() => {})
-      const project = await searchProjectRepository.getById(queue.projectId).catch(() => undefined)
-      if (project?.mssqlRunId !== undefined) {
-        updateSearchRunInSql(project.mssqlRunId, { status: 'stopped', totalLeads: project.totalLeads }).catch(() => {})
-      }
     }
     await log('search_queue', `Search run stopped at ${queue.index + 1}/${queue.terms.length} — ${queue.totalLeads} leads captured across finished searches`)
   }
@@ -1579,13 +1152,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (type === MSG.CONTENT_READY) {
     sendResponse({ ok: true })
-    return true
-  }
-
-  if (type === MSG.SYNC_FROM_DB) {
-    syncLeadsFromMssql()
-      .then((result) => sendResponse({ ok: true, synced: result.synced }))
-      .catch(() => sendResponse({ ok: false }))
     return true
   }
 
@@ -1737,9 +1303,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // rejection (it surfaced as a spurious extension error).
           chrome.tabs.update(job.tabId, { url: nextUrl }).catch(() => {})
         } else if (!nextUrl) {
-          // Scraping is complete — save results to IndexedDB and MSSQL
+          // Scraping is complete — save results to IndexedDB
           await saveLiJobToDeepResearch(job)
-          await saveLiJobToLinkedInSql(job)
           chrome.tabs.sendMessage(job.tabId ?? -1, { type: 'LI_DONE' }).catch(() => {})
           // Close the scraper tab from the SW side — content-script window.close()
           // is blocked after multi-page navigation, and an unattended queue run
@@ -2079,51 +1644,9 @@ async function saveLiJobToDeepResearch(job: LinkedInScraperJob): Promise<void> {
       await leadRepository.updateStatus(job.leadId, 'research_completed')
     }
 
-    // Save full data to MSSQL
-    const { saveDeepResearchToSql } = await import('@/services/sqlSyncService')
-    if (lead) {
-      // Pack into the DeepResearch shape saveDeepResearchToSql expects
-      await saveDeepResearchToSql(lead, {
-        ...drRecord,
-        id: existingDR?.id,
-        fullDeepResearchJson: JSON.stringify({ ...drRecord, rawLinkedInJob: job }),
-      } as any).catch(() => {})
-    }
-
     await log('system', `LinkedIn scrape saved: ${job.companyName} — ${job.companyPosts.length} company posts, ${job.personResults.length} people profiled`)
   } catch (err: any) {
     await log('system', `LinkedIn scrape save error: ${err?.message}`)
-  }
-}
-
-// ─── LinkedIn scraper → dedicated MSSQL tables (Phase 3 LinkedIn Business Intelligence) ──
-
-async function saveLiJobToLinkedInSql(job: LinkedInScraperJob): Promise<void> {
-  try {
-    const lead = await leadRepository.getById(job.leadId)
-    if (!lead) return
-
-    const {
-      saveLinkedInCompanyProfile, saveLinkedInCompanyPosts,
-      saveLinkedInPeople, saveLinkedInPersonPosts,
-    } = await import('@/services/sqlSyncService')
-
-    if (job.companyProfile) {
-      await saveLinkedInCompanyProfile(lead, job.companyProfile).catch(() => {})
-    }
-    if (job.companyPosts.length > 0) {
-      await saveLinkedInCompanyPosts(lead, job.companyPosts).catch(() => {})
-    }
-    if (job.teamMembers.length > 0) {
-      await saveLinkedInPeople(lead, job.teamMembers).catch(() => {})
-    }
-    for (const result of job.personResults) {
-      await saveLinkedInPersonPosts(lead, result.person, result.posts).catch(() => {})
-    }
-
-    await log('system', `LinkedIn intelligence synced to SQL: ${job.companyName}`)
-  } catch (err: any) {
-    await log('system', `LinkedIn intelligence SQL sync error: ${err?.message}`)
   }
 }
 
@@ -2134,86 +1657,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   await ensureResearchAlarm()
   await ensureNurtureAlarm()
   await resetStuckJobs()
-
-  // On fresh install, sync from MSSQL — it is the single source of truth.
-  // If MSSQL is empty, extension stays empty.
-  if (details.reason === 'install') {
-    syncLeadsFromMssql().catch(() => {})
-  }
 })
-
-async function restoreLeadsFromSql() {
-  const available = await isApiAvailable()
-  if (!available) return  // API not running — nothing to restore
-
-  const data = await restoreFromSql()
-  if (!data || !data.companies?.length) return
-
-  // Map companyId (SQL GUID) → IndexedDB lead id for enrichment linking
-  const idMap = new Map<string, number>()
-
-  // Build a lookup of existing leads to avoid re-inserting duplicates
-  const existingLeads = await leadRepository.getAll()
-  const existingNames = new Set(existingLeads.map((l) => l.companyName?.toLowerCase()))
-
-  let restored = 0
-  for (const c of data.companies) {
-    if (existingNames.has(c.companyName?.toLowerCase())) continue
-
-    const leadId = await leadRepository.create({
-      companyName:   c.companyName,
-      address:       c.address,
-      phone:         c.phone,
-      website:       c.website,
-      googleMapsUrl: c.googleMapsUrl,
-      rating:        c.rating,
-      reviewCount:   c.reviewCount,
-      category:      c.category,
-      city:          c.city,
-      keyword:       c.keyword ?? '',
-      searchQuery:   c.sessionName ?? '',
-      normalizedName: c.companyName?.toLowerCase() ?? '',
-      status:        'new',
-      capturedAt:    c.sessionCreatedAt ?? nowISO(),
-      updatedAt:     nowISO(),
-      confidence:    0.8,
-      sessionId:     0,
-      source:        'sql_restore',
-    })
-    idMap.set(c.companyId, leadId)
-    restored++
-  }
-
-  // Restore research results
-  let enriched = 0
-  for (const e of data.enrichments ?? []) {
-    const leadId = idMap.get(e.companyId)
-    if (!leadId) continue
-    try {
-      const services = e.services ? JSON.parse(e.services) : undefined
-      await researchResultRepository.create({
-        leadId,
-        jobId:         0,
-        decisionMaker: e.decisionMaker ?? undefined,
-        email:         e.email ?? undefined,
-        website:       e.website ?? undefined,
-        linkedIn:      e.linkedIn ?? undefined,
-        facebook:      e.facebook ?? undefined,
-        instagram:     e.instagram ?? undefined,
-        youtube:       e.youtube ?? undefined,
-        services,
-        employeeCount: e.employeeCount ?? undefined,
-        yearFounded:   e.yearFounded ? Number(e.yearFounded) : undefined,
-        companyType:   e.companyType ?? undefined,
-        summary:       e.summary ?? undefined,
-        confidence:    e.confidence ?? 0.5,
-      })
-      enriched++
-    } catch { /* skip duplicates */ }
-  }
-
-  await log('sql_restore_completed', `Restored ${restored} leads and ${enriched} research results from MSSQL`)
-}
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureResearchAlarm()

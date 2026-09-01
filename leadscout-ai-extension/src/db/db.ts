@@ -10,7 +10,6 @@ import type { SelectedLead, ResearchedLead } from '@/types/derivedLeads'
 import type { SessionRecord } from '@/types/session'
 import type { ScrapedLead, ImportedLead } from '@/types/pipelineLead'
 // SearchEvidence, SourcePage, CompanyResearch removed from IndexedDB (version 8).
-// Phase 3 data is stored exclusively in MSSQL via apiResearchService.
 
 export interface ActivityLog {
   id?: number

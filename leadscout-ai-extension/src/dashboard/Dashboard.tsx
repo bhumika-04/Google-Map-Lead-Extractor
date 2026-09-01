@@ -102,12 +102,10 @@ export default function Dashboard() {
       )
     }).catch(() => {})
 
-    // MSSQL is the single source of truth — sync on every dashboard open.
-    // If the database was cleared, this will clear local data too.
-    chrome.runtime.sendMessage({ type: MSG.SYNC_FROM_DB })
-      .then(() => loadLeads())
-      .catch(() => loadLeads())  // If backend down, fall back to whatever is local
-      .finally(() => syncDerivedLeads())   // rebuild selected/researched tables from leads
+    // Local Dexie is the source of truth on open; explicit sync-down from the
+    // database (Backup & Restore -> "Sync from Database") is a deliberate
+    // user action via restoreFromNewSchema(), not automatic on every mount.
+    loadLeads().finally(() => syncDerivedLeads())   // rebuild selected/researched tables from leads
 
     chrome.runtime.sendMessage({ type: MSG.GET_STATUS })
       .then((res: any) => {

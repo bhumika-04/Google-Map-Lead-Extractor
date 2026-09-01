@@ -6,7 +6,6 @@ import { researchResultRepository } from '@/db/researchResultRepository'
 import { leadRepository } from '@/db/leadRepository'
 import { db } from '@/db/db'
 import { runDeepResearch } from '@/services/deepResearchService'
-import { saveDeepResearchToSql } from '@/services/sqlSyncService'
 import { useSettingsStore } from '@/state/useSettingsStore'
 import { useLeadStore } from '@/state/useLeadStore'
 import { exportRowsToCSV, exportFullCSV, type ExportRowInput } from '@/utils/csvExport'
@@ -266,9 +265,6 @@ function ResultDetail({ result }: { result: EnrichedResult }) {
       const id = await db.deepResearch.add(dr)
       const saved = { ...dr, id: id as number }
       setDeepResearch(saved)
-
-      // Sync to MSSQL — best-effort, does not block UI
-      saveDeepResearchToSql(result.lead, saved).catch(() => {})
     } catch (err: any) {
       setDeepError(err?.message ?? 'Deep research failed')
     } finally {

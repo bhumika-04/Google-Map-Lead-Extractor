@@ -3,7 +3,7 @@ import { useSettingsStore } from '@/state/useSettingsStore'
 import { useLeadStore } from '@/state/useLeadStore'
 import { leadRepository } from '@/db/leadRepository'
 import { validateLeads, DailyQuotaExhaustedError, type ValidationResult, type ValidationProvider } from '@/services/leadValidationService'
-import { saveValidationBulkToSql, resolveAiCredentials, saveBusinessProfile } from '@/services/sqlSyncService'
+import { resolveAiCredentials, saveBusinessProfile } from '@/services/sqlSyncService'
 import { toast } from '@/state/useToastStore'
 
 type State = 'idle' | 'running' | 'done' | 'quota_exhausted'
@@ -180,20 +180,6 @@ export default function ValidationPanel() {
     ])
     const relevantIds = relevant.map((r) => r.leadId)
     await leadRepository.updateMany(relevantIds, { status: 'selected' })
-
-    // 2. Persist to MSSQL so Selected Leads survive extension reinstall
-    const allLeads = await Promise.all(
-      [...relevant.map(r => r.leadId), ...notRelevant.map(r => r.leadId)]
-        .map(id => leadRepository.getById(id))
-    )
-    const relevantIdSet = new Set(relevantIds)
-    const mssqlUpdates = allLeads
-      .filter((l): l is NonNullable<typeof l> => !!l?.mssqlId)
-      .map(l => ({
-        mssqlId: l.mssqlId!,
-        status:  relevantIdSet.has(l.id!) ? 'selected' as const : 'not_relevant' as const,
-      }))
-    saveValidationBulkToSql(mssqlUpdates).catch(() => {})   // fire-and-forget
 
     await loadLeads({ status: 'selected' })
     setConfirmed(true)

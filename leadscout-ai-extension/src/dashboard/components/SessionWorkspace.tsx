@@ -7,7 +7,7 @@ import { scrapedLeadRepo } from '@/db/pipelineLeadRepository'
 import type { ScrapedLead } from '@/types/pipelineLead'
 import { addToResearchQueue } from '@/services/futureResearchService'
 import { syncDerivedLeads } from '@/services/derivedLeadsService'
-import { updateSearchRunInSql } from '@/services/sqlSyncService'
+import { updateSessionInSql } from '@/services/pipelineSyncService'
 import { useLeadStore } from '@/state/useLeadStore'
 import { toast } from '@/state/useToastStore'
 import { confirmDialog } from '@/state/useConfirmStore'
@@ -133,7 +133,7 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     if (!project?.id) return
     const value = profileDraft.trim()
     await searchProjectRepository.update(project.id, { businessProfile: value })
-    if (project.mssqlRunId !== undefined) updateSearchRunInSql(project.mssqlRunId, { businessProfile: value }).catch(() => {})
+    if (project.newSessionMssqlId !== undefined) updateSessionInSql(project.newSessionMssqlId, { businessProfile: value }).catch(() => {})
     setProject({ ...project, businessProfile: value })
     setEditingProfile(false)
     toast.success('Session ICP updated — used for this session’s next validation & research')
@@ -143,7 +143,7 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     if (!project?.id) return
     if (!await confirmDialog('Clear this session\'s custom ICP and use the global business profile (from appsettings.json) instead?', { confirmLabel: 'Clear ICP' })) return
     await searchProjectRepository.update(project.id, { businessProfile: '' })
-    if (project.mssqlRunId !== undefined) updateSearchRunInSql(project.mssqlRunId, { businessProfile: '' }).catch(() => {})
+    if (project.newSessionMssqlId !== undefined) updateSessionInSql(project.newSessionMssqlId, { businessProfile: '' }).catch(() => {})
     setProject({ ...project, businessProfile: '' })
     toast.success('Session ICP cleared — now using the global profile for validation')
   }
