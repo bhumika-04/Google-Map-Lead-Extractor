@@ -176,8 +176,21 @@ app.MapPost("/api/leads/{kind}/save-batch", async (string kind, SaveBatchIn body
     // repeats the same company (e.g. re-appearing while scrolling). Keep the
     // last occurrence per normalized_name, matching the old loop's effective
     // behavior (each iteration's MERGE overwrote whatever the previous one wrote).
+    //
+    // A blank normalized_name (company names with no letters/digits at all,
+    // e.g. symbol-only names) is excluded from this dedup — the table's own
+    // unique index excludes '' from uniqueness (`WHERE normalized_name <> ''`),
+    // so multiple genuinely different companies can already share normalized_name
+    // = '' in the target table. Collapsing them together here, or matching them
+    // in the MERGE below, both wrongly treat unrelated companies as "the same
+    // row" — give each a synthetic per-item key instead.
     var deduped = new Dictionary<string, LeadIn>();
-    foreach (var l in body.Leads) deduped[l.NormalizedName] = l;
+    var blankSeq = 0;
+    foreach (var l in body.Leads)
+    {
+        var key = string.IsNullOrEmpty(l.NormalizedName) ? $"__blank_{blankSeq++}" : l.NormalizedName;
+        deduped[key] = l;
+    }
     if (deduped.Count == 0) return Results.Ok(new { saved = 0, ids = Array.Empty<object>() });
 
     var leadsJson = JsonSerializer.Serialize(deduped.Values.Select(l => new
@@ -216,7 +229,7 @@ app.MapPost("/api/leads/{kind}/save-batch", async (string kind, SaveBatchIn body
             source_row_json  NVARCHAR(MAX)  '$.sourceRowJson'
           ) j
         ) AS s
-          ON t.session_id = s.session_id AND t.normalized_name = s.normalized_name
+          ON t.session_id = s.session_id AND t.normalized_name = s.normalized_name AND s.normalized_name <> ''
         WHEN MATCHED THEN UPDATE SET
           company_name = s.company_name, category = s.category, rating = s.rating,
           review_count = s.review_count, address = s.address, phone = s.phone, website = s.website,
