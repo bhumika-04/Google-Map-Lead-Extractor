@@ -10,6 +10,7 @@ import { activityLogRepository } from '@/db/activityLogRepository'
 import { MSG } from '@/types/messages'
 import { nowISO } from '@/utils/date'
 import type { Lead } from '@/types/lead'
+import type { ScrapedLead } from '@/types/pipelineLead'
 
 // Mirrors a legacy Lead into the redesigned scraped_leads table, matching
 // the shape the Maps-capture flow's own dual-write uses (serviceWorker.ts's
@@ -37,6 +38,39 @@ function toScrapedLeadPatch(l: Lead) {
     researchStatus: 'none' as const,
     capturedAt: l.capturedAt ?? now,
     updatedAt: now,
+  }
+}
+
+// scrapedLeadRepo.upsertCapture's own built-in matching keys on normalizedName
+// ALONE (no city) — fine for Maps capture (one search area at a time), but
+// wrong here: a national CSV import routinely has the same company name
+// recurring in many different cities as genuinely different businesses
+// ("Maruti Laminate" in both Ahmedabad and Surat). Matching by name only
+// would collapse them into a single mirror row, undercounting the session's
+// funnel against the legacy table's (correctly city-aware) count. Match on
+// normalizedName + city instead, tracked in our own local array so later
+// rows in the same import can also dedupe against ones just mirrored.
+function findScrapedMatch(rows: ScrapedLead[], lead: Lead): ScrapedLead | undefined {
+  if (lead.googleMapsUrl) {
+    const byUrl = rows.find((r) => r.googleMapsUrl === lead.googleMapsUrl)
+    if (byUrl) return byUrl
+  }
+  if (lead.phone) {
+    const byPhone = rows.find((r) => r.phone === lead.phone)
+    if (byPhone) return byPhone
+  }
+  return rows.find((r) => r.normalizedName === lead.normalizedName && (r.city ?? '') === (lead.city ?? ''))
+}
+
+async function mirrorToScraped(newSessionId: number, scrapedRows: ScrapedLead[], lead: Lead): Promise<void> {
+  const match = findScrapedMatch(scrapedRows, lead)
+  const patch = toScrapedLeadPatch(lead)
+  if (match?.id) {
+    await scrapedLeadRepo.update(match.id, patch).catch(() => {})
+    Object.assign(match, patch)
+  } else {
+    const id = await scrapedLeadRepo.create({ ...patch, sessionId: newSessionId }).catch(() => undefined)
+    if (id) scrapedRows.push({ ...patch, sessionId: newSessionId, id } as ScrapedLead)
   }
 }
 
@@ -97,6 +131,7 @@ export default function SessionCsvImport({ mode, projectId, newSessionId, onImpo
     // against it, and newly-created/updated rows are appended so later rows
     // in the same file can dedupe against earlier ones too.
     const sessionLeads = await leadRepository.getByFilter({ projectId })
+    const scrapedRows = newSessionId !== undefined ? await scrapedLeadRepo.getBySession(newSessionId) : []
 
     for (const row of rows) {
       const mapped = mapRow(row, 0)
@@ -137,9 +172,7 @@ export default function SessionCsvImport({ mode, projectId, newSessionId, onImpo
             const idx = sessionLeads.findIndex((l) => l.id === fresh.id)
             if (idx >= 0) sessionLeads[idx] = fresh
             if (fresh.status === 'selected') toQueue.push(fresh)
-            if (newSessionId !== undefined) {
-              await scrapedLeadRepo.upsertCapture(newSessionId, [{ ...toScrapedLeadPatch(fresh), normalizedName: fresh.normalizedName, companyName: fresh.companyName }]).catch(() => {})
-            }
+            if (newSessionId !== undefined) await mirrorToScraped(newSessionId, scrapedRows, fresh)
           }
         } else {
           const id = await leadRepository.create(mapped)
@@ -148,9 +181,7 @@ export default function SessionCsvImport({ mode, projectId, newSessionId, onImpo
           if (fresh) {
             sessionLeads.push(fresh)
             if (fresh.status === 'selected') toQueue.push(fresh)
-            if (newSessionId !== undefined) {
-              await scrapedLeadRepo.upsertCapture(newSessionId, [{ ...toScrapedLeadPatch(fresh), normalizedName: fresh.normalizedName, companyName: fresh.companyName }]).catch(() => {})
-            }
+            if (newSessionId !== undefined) await mirrorToScraped(newSessionId, scrapedRows, fresh)
           }
         }
       } catch {
