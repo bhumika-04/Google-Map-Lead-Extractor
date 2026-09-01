@@ -127,31 +127,37 @@ async function writeCache(key: string, cities: string[]): Promise<void> {
 
 /**
  * Run a prompt through the configured AI providers and return the first
- * non-empty text response. Prefers OpenAI (explicit product choice), falling
- * back to Gemini then Anthropic using whichever keys are set.
+ * non-empty text response.
+ *
+ * appsettings.json (DeepLeadApi backend) is the PRIMARY key source, checked
+ * first via resolveAiCredentials — the extension's own Settings-page keys
+ * are only used as a fallback when the backend is unreachable or has no key
+ * configured. (Previously this checked local Settings keys first, so a
+ * stale/wrong key saved once in the extension UI would keep shadowing a
+ * perfectly valid backend key forever, failing every call with no obvious
+ * cause.)
  *
  * @throws if no AI key is configured or every provider fails.
  */
 async function runAiText(prompt: string, settings: AppSettings): Promise<string> {
   const attempts: { name: string; run: () => Promise<string> }[] = []
-  if (settings.openAiApiKey)    attempts.push({ name: 'openai (local)',    run: () => callOpenAi(prompt, settings.openAiApiKey, settings.openAiModel) })
-  if (settings.geminiApiKey)    attempts.push({ name: 'gemini (local)',    run: () => callGemini(prompt, settings.geminiApiKey, settings.geminiModel) })
-  if (settings.anthropicApiKey) attempts.push({ name: 'anthropic (local)', run: () => callClaude(prompt, settings.anthropicApiKey, settings.anthropicModel) })
 
-  // No key in extension settings → fall back to the backend-configured key
-  // (DeepLeadApi appsettings.json, served at /api/config).
-  if (attempts.length === 0) {
-    const cred = await resolveAiCredentials(settings).catch(() => null)
-    console.log(`[cityService] no local key; backend provider=${cred?.provider ?? 'none'} hasKey=${!!cred?.apiKey}`)
-    if (cred?.apiKey) {
-      if (cred.provider === 'openai')         attempts.push({ name: 'openai (backend)',    run: () => callOpenAi(prompt, cred.apiKey, settings.openAiModel) })
-      else if (cred.provider === 'anthropic') attempts.push({ name: 'anthropic (backend)', run: () => callClaude(prompt, cred.apiKey, settings.anthropicModel) })
-      else                                    attempts.push({ name: 'gemini (backend)',    run: () => callGemini(prompt, cred.apiKey, settings.geminiModel) })
-    }
+  const cred = await resolveAiCredentials(settings).catch(() => null)
+  console.log(`[cityService] backend provider=${cred?.provider ?? 'none'} hasKey=${!!cred?.apiKey}`)
+  if (cred?.apiKey) {
+    if (cred.provider === 'openai')         attempts.push({ name: 'openai (resolved)',    run: () => callOpenAi(prompt, cred.apiKey, settings.openAiModel) })
+    else if (cred.provider === 'anthropic') attempts.push({ name: 'anthropic (resolved)', run: () => callClaude(prompt, cred.apiKey, settings.anthropicModel) })
+    else                                    attempts.push({ name: 'gemini (resolved)',    run: () => callGemini(prompt, cred.apiKey, settings.geminiModel) })
   }
 
+  // Fall back to whatever else is set locally, in case the resolved
+  // provider/key above fails at request time (e.g. rate-limited).
+  if (settings.openAiApiKey && cred?.provider !== 'openai')       attempts.push({ name: 'openai (local)',    run: () => callOpenAi(prompt, settings.openAiApiKey, settings.openAiModel) })
+  if (settings.geminiApiKey && cred?.provider !== 'gemini')       attempts.push({ name: 'gemini (local)',    run: () => callGemini(prompt, settings.geminiApiKey, settings.geminiModel) })
+  if (settings.anthropicApiKey && cred?.provider !== 'anthropic') attempts.push({ name: 'anthropic (local)', run: () => callClaude(prompt, settings.anthropicApiKey, settings.anthropicModel) })
+
   if (attempts.length === 0) {
-    throw new Error('No AI API key found — set one in Settings → AI Research (or the backend appsettings.json).')
+    throw new Error('No AI API key found — set one in the backend appsettings.json (or Settings → AI Research).')
   }
 
   let lastErr: unknown

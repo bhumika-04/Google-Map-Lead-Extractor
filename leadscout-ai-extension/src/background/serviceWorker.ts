@@ -1875,23 +1875,21 @@ async function loadSettingsForResearch(): Promise<AppSettings> {
   // hardcoded) should not shadow the hardcoded default.
   if (!settings.businessProfile?.trim()) settings = { ...settings, businessProfile: DEFAULT_SETTINGS.businessProfile }
 
-  // If the extension UI has no API key, try pulling one from appsettings.json via the
-  // local API. This is the fallback for the "developer machine" scenario where the key
-  // lives in the backend config and has not been entered in the extension settings page.
-  const needsKey = settings.researchProvider === 'gemini' ? !settings.geminiApiKey
-    : settings.researchProvider === 'openai' ? !settings.openAiApiKey
-    : !settings.anthropicApiKey
-
-  if (needsKey) {
-    try {
-      const apiConfig = await fetchApiConfig()
-      if (apiConfig?.hasKey) {
-        settings = apiConfig.researchProvider === 'gemini'
-          ? { ...settings, researchProvider: 'gemini', geminiApiKey: apiConfig.geminiApiKey, geminiModel: apiConfig.geminiModel }
-          : { ...settings, researchProvider: 'openai', openAiApiKey: apiConfig.openAiApiKey, openAiModel: apiConfig.openAiModel }
-      }
-    } catch {}
-  }
+  // appsettings.json (DeepLeadApi backend) is the PRIMARY key source — always
+  // check it first, regardless of whether the extension's own Settings page
+  // also has a key entered. A stale/wrong key saved once in the extension UI
+  // would otherwise keep silently shadowing a perfectly valid key in
+  // appsettings.json forever, with no obvious way to tell why calls were
+  // failing. The extension's local Settings key is only used when the
+  // backend is unreachable or has no key configured.
+  try {
+    const apiConfig = await fetchApiConfig()
+    if (apiConfig?.hasKey) {
+      settings = apiConfig.researchProvider === 'gemini'
+        ? { ...settings, researchProvider: 'gemini', geminiApiKey: apiConfig.geminiApiKey, geminiModel: apiConfig.geminiModel }
+        : { ...settings, researchProvider: 'openai', openAiApiKey: apiConfig.openAiApiKey, openAiModel: apiConfig.openAiModel }
+    }
+  } catch {}
 
   return settings
 }

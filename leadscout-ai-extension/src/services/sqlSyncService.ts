@@ -62,20 +62,20 @@ export interface ResolvedAiCredentials {
 // DeepLeadApi backend's appsettings.json (Gemini:ApiKey, or OpenAI:ApiKey if no
 // Gemini key is set) so a key only needs to live in one place and never has to
 // be typed into the UI.
+// appsettings.json (DeepLeadApi backend) is the PRIMARY key source — it's the
+// one place meant to hold real credentials, so rotating a key only means
+// editing one file and restarting the backend. The extension's own Settings
+// page key is a fallback for when the backend is unreachable, NOT the other
+// way around. (Previously local-first: a stale/wrong key entered once in the
+// extension's Settings page would keep being used forever, silently shadowing
+// a perfectly valid key in appsettings.json with no way to tell without
+// digging through devtools.)
 export async function resolveAiCredentials(settings: {
   researchProvider: 'gemini' | 'openai' | 'anthropic'
   geminiApiKey: string
   openAiApiKey: string
   anthropicApiKey: string
 }): Promise<ResolvedAiCredentials> {
-  const provider = settings.researchProvider
-  const localKey =
-    provider === 'openai'    ? settings.openAiApiKey :
-    provider === 'anthropic' ? settings.anthropicApiKey :
-    settings.geminiApiKey
-
-  if (localKey.trim()) return { provider, apiKey: localKey }
-
   const cfg = await fetchApiConfig()
   if (cfg?.hasKey) {
     return cfg.researchProvider === 'gemini'
@@ -83,7 +83,13 @@ export async function resolveAiCredentials(settings: {
       : { provider: 'openai', apiKey: cfg.openAiApiKey }
   }
 
-  return { provider, apiKey: '' }
+  const provider = settings.researchProvider
+  const localKey =
+    provider === 'openai'    ? settings.openAiApiKey :
+    provider === 'anthropic' ? settings.anthropicApiKey :
+    settings.geminiApiKey
+
+  return { provider, apiKey: localKey }
 }
 
 export interface SyncLead {
