@@ -114,13 +114,13 @@ All sent messages and replies are logged to MSSQL with timestamps. Stage changes
 - Falls back to wa.me link if Interakt is not configured
 
 ### Data Persistence — Survives Reinstall
-- **MSSQL is the single source of truth**
-- Every lead captured is synced to MSSQL in batches of 10
-- Every research result is saved to MSSQL immediately on completion
-- Every deep research result saved immediately on completion
-- On dashboard open: pulls all leads + enrichments from MSSQL back into IndexedDB
-- Full JSON backup also stored via API (additional fallback for offline scenarios)
-- After sync, each lead gets `mssqlId` (UUID) written back — used to load conversation history
+- **IndexedDB (Dexie) is the working source of truth**; MSSQL is the durable mirror
+- Captured leads, enrichment, validation, and research are synced to MSSQL
+  (`sessions` / `scraped_leads` / `imported_leads`) as each stage completes
+- **Sync-down is explicit**, not automatic — go to **Backup & Restore → Sync from
+  Database** to pull sessions/leads back from MSSQL into a fresh install or a
+  second device. (It does not run automatically on every dashboard open.)
+- After sync, each lead gets `mssqlId` written back for reference
 
 ### Theme
 - Dark mode (default) and light mode
@@ -152,33 +152,36 @@ All sent messages and replies are logged to MSSQL with timestamps. Stage changes
 ┌──────────────────────────────────────────────────────────┐
 │  DeepLeadApi  (ASP.NET 9 Minimal API + Dapper)           │
 │                                                          │
-│  /api/leads/save-batch   → batch upsert on capture       │
-│  /api/sync               → full session sync + leadIdMap │
-│  /api/research/save      → auto-called after AI research │
-│  /api/deep-research/save → auto-called after deep scan   │
-│  /api/outreach/*         → conversation tracking         │
-│  /api/restore            → full restore on reinstall     │
-│  /api/extension-backup   → JSON backup fallback          │
+│  /api/sessions               → create/list/update/delete │
+│  /api/leads/{kind}/save-batch → batch upsert on capture   │
+│  /api/leads/{kind}/{id}/enrichment  → AI enrichment write │
+│  /api/leads/{kind}/{id}/validation  → ICP score write     │
+│  /api/leads/{kind}/validate-bulk    → batch ICP write     │
+│  /api/leads/{kind}/{id}/research    → deep research write │
+│  /api/restore                → full restore on reinstall  │
+│  /api/existing-clients/*     → do-not-contact list         │
+│  kind = "scraped" | "imported"                            │
 └─────────────────────────────┬────────────────────────────┘
                               │ Dapper
                               ▼
 ┌─────────────────────────────────────────┐
 │  MSSQL  (SQL Server Express)            │
 │                                         │
-│  search_projects                        │
-│  companies               (leads)        │
-│  company_enrichments     (research)     │
-│  company_contacts        (team members) │
-│  company_deep_research   (social intel) │
-│  search_evidence         (Google links) │
-│  source_pages            (pages opened) │
-│  company_research        (merged data)  │
-│  outreach_conversations  (threads)      │
-│  conversation_messages   (log)          │
-│  nurture_templates                      │
-│  nurture_sequences                      │
+│  sessions            (one per run/import)│
+│  scraped_leads        (Maps capture)     │
+│  imported_leads       (CSV/Excel)        │
+│  existing_clients     (do-not-contact)   │
+│  outreach_conversations  (threads)*      │
+│  conversation_messages   (log)*          │
+│  nurture_templates*                      │
+│  nurture_sequences*                      │
 └─────────────────────────────────────────┘
 ```
+
+\* Outreach/Nurture/Follow-Ups tables and API routes exist, but the
+extension's client code for these three features currently calls a
+different, non-matching set of paths (leftover from an earlier API
+shape) — see **Known Issues** below.
 
 **Tech Stack:**
 
@@ -463,25 +466,29 @@ Pipeline stages: **Cold → Contacted → Replied → Nurturing → Meeting Sche
 
 ## API Reference
 
-All endpoints run on `http://localhost:5150`.
+All endpoints run on `http://localhost:5150`. Source of truth: `DeepLeadApi/Program.cs`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/health` | Health check → `{ ok: true }` |
-| GET | `/api/config` | Get AI provider config |
-| POST | `/api/leads/save-batch` | Batch upsert leads during capture |
-| POST | `/api/leads/save` | Single lead save with validation status |
-| POST | `/api/sync` | Full session sync, returns `leadIdMap` |
-| POST | `/api/research/save` | Save AI research result (auto-called) |
-| POST | `/api/deep-research/save` | Save deep research / social intel (auto-called) |
-| POST | `/api/outreach/send` | Log outbound message, create conversation |
-| POST | `/api/outreach/reply` | Log inbound reply |
-| POST | `/api/outreach/stage` | Update conversation stage |
-| GET | `/api/outreach/{companyId}` | Fetch conversation history |
-| GET | `/api/restore` | Restore all leads + enrichments on reinstall |
-| GET | `/api/restore/full/{companyId}` | Restore research + deep research for one company |
-| POST | `/api/extension-backup` | Save IndexedDB JSON snapshot |
-| GET | `/api/extension-backup` | Retrieve JSON snapshot |
+| GET | `/api/health` | Health check |
+| GET | `/api/config` | AI provider + business-profile config (from `appsettings.json`) |
+| POST | `/api/config/business-profile` | Update the ICP prompt in `appsettings.json` |
+| GET / POST | `/api/sessions` | List / create a session (scrape run or import batch) |
+| PUT / DELETE | `/api/sessions/{id}` | Update / delete a session |
+| POST | `/api/leads/{kind}/save-batch` | Batch upsert leads (`kind` = `scraped` \| `imported`) |
+| PUT | `/api/leads/{kind}/{id}/enrichment` | Write AI enrichment fields |
+| PUT | `/api/leads/{kind}/{id}/validation` | Write ICP score for one lead |
+| POST | `/api/leads/{kind}/validate-bulk` | Write ICP scores for many leads |
+| PUT | `/api/leads/{kind}/{id}/research` | Write deep research fields |
+| PUT | `/api/leads/{kind}/{id}/status` | Update a lead's pipeline status |
+| GET | `/api/leads/{kind}` | List leads (optionally by session) |
+| GET | `/api/restore` | Full restore: `{ sessions, scrapedLeads, importedLeads }` |
+| GET / POST | `/api/existing-clients` | List / upload the do-not-contact list |
+| DELETE | `/api/existing-clients/{id}` | Remove one existing client |
+| GET / POST | `/api/outreach/conversations` | Conversation threads |
+| GET / POST | `/api/outreach/conversations/{id}/messages` | Messages in a thread |
+| GET / POST | `/api/nurture/templates` | Nurture message templates |
+| GET / POST | `/api/nurture/sequences`, PUT `/{id}` | Scheduled nurture sends |
 
 ---
 
@@ -489,20 +496,20 @@ All endpoints run on `http://localhost:5150`.
 
 | Table | Purpose |
 |---|---|
-| `search_projects` | Search sessions (city + keyword + totals) |
-| `companies` | All captured leads with validation + outreach status |
-| `company_enrichments` | AI research results (30+ fields + JSON arrays) |
-| `company_contacts` | Individual team members (one row per person) |
-| `company_deep_research` | Social intel, intent signals, pitch template |
-| `search_evidence` | Every classified Google search result per company (accepted + rejected, with reasons) |
-| `source_pages` | Each source link actually opened, raw text + per-page AI extraction |
-| `company_research` | Merged, confidence-weighted profile from all source pages (powers Company Intelligence page) |
-| `outreach_conversations` | One thread per company + channel |
+| `sessions` | One row per scrape run or import batch — name, ICP prompt, status |
+| `scraped_leads` | Google Maps capture output — full lifecycle inline (capture → enrichment → validation → research) |
+| `imported_leads` | CSV/Excel import output — same inline lifecycle shape as `scraped_leads` |
+| `existing_clients` | Do-not-contact list (excluded from new outreach) |
+| `outreach_conversations` | One thread per lead + channel (`lead_id`/`lead_source` polymorphic ref) |
 | `conversation_messages` | Full inbound/outbound message log |
 | `nurture_templates` | Reusable message templates |
-| `nurture_sequences` | Scheduled nurture sends per company + template |
+| `nurture_sequences` | Scheduled nurture sends per lead + template |
 
-View `vw_lead_pipeline` joins all tables for full pipeline reporting.
+`scraped_leads`/`imported_leads` replaced the older `companies` /
+`company_enrichments` / `company_contacts` / `company_deep_research` /
+`search_evidence` / `source_pages` / `company_research` table set from an
+earlier schema generation — "validated" and "researched" are now **states**
+of a lead row (status columns), not separate tables.
 
 ---
 
@@ -566,6 +573,24 @@ The 6-month scroll loop runs inside the tab context:
 - Keep `QUOTED_IDENTIFIER ON` so the filtered indexes create — it's the SSMS default; with `sqlcmd` pass the `-I` flag
 
 ---
+
+## Known Issues
+
+- **Nurture, Outreach, and Follow-Ups pages call endpoints the backend doesn't
+  expose.** `nurtureService.ts` (schedule/due/scheduled/complete/skip),
+  `outreachService.ts` (send/reply/stage/`{companyId}`), and
+  `FollowUpPanel.tsx` (`/api/followups/due`, `/api/followups/upcoming`) all
+  target a different, earlier API shape than what `Program.cs` currently
+  implements (`/api/outreach/conversations`, `/api/nurture/sequences`).
+  Every call fails silently — these three UI pages are reachable but
+  non-functional against the current backend until either the client is
+  rewritten to the current routes or matching routes are added server-side.
+- **`ValidationPanel.tsx`** is not rendered from any page in the current
+  dashboard routing — the working batch-validation flow lives in
+  `services/leadValidationService.ts` + `services/autoPipelineService.ts`
+  instead, wired into the Session Workspace's Validation step.
+- **Deep research results are not synced to MSSQL** — `db.deepResearch` is
+  local-only; the API route it used to sync to no longer exists.
 
 ## License
 
