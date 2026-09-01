@@ -341,7 +341,7 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
           columns/actions/export). Funnel + Selected + Researched read the new tables. */}
       {tab === 'leads' && (
         <div className="flex flex-col gap-3 min-h-0 flex-1">
-          <SessionCsvImport mode="leads" projectId={projectId} />
+          <SessionCsvImport mode="leads" projectId={projectId} newSessionId={project?.newSessionId} />
           <LeadTable title="Leads in this session" />
         </div>
       )}

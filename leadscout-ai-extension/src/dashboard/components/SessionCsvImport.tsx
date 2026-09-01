@@ -2,12 +2,43 @@ import React, { useRef, useState } from 'react'
 import { parseSpreadsheet, isSpreadsheetFile, IMPORT_ACCEPT } from '@/utils/spreadsheet'
 import { mapRow } from '@/utils/csvImport'
 import { leadRepository } from '@/db/leadRepository'
+import { scrapedLeadRepo } from '@/db/pipelineLeadRepository'
 import { isDuplicate, mergeLeadData } from '@/utils/dedupe'
 import { addToResearchQueue } from '@/services/futureResearchService'
 import { toast } from '@/state/useToastStore'
 import { activityLogRepository } from '@/db/activityLogRepository'
 import { MSG } from '@/types/messages'
+import { nowISO } from '@/utils/date'
 import type { Lead } from '@/types/lead'
+
+// Mirrors a legacy Lead into the redesigned scraped_leads table, matching
+// the shape the Maps-capture flow's own dual-write uses (serviceWorker.ts's
+// toScrapedLead). Without this, imported leads only ever show up in the
+// legacy `leads` table — the workspace funnel and tab counts read the
+// scraped_leads mirror when it exists, so they'd silently stay stuck at
+// the pre-import count while the actual Leads table below them was correct.
+function toScrapedLeadPatch(l: Lead) {
+  const now = nowISO()
+  return {
+    companyName: l.companyName,
+    normalizedName: l.normalizedName,
+    category: l.category,
+    rating: l.rating,
+    reviewCount: l.reviewCount,
+    address: l.address,
+    phone: l.phone,
+    website: l.website,
+    googleMapsUrl: l.googleMapsUrl,
+    city: l.city,
+    keyword: l.keyword,
+    country: l.country,
+    status: (l.status === 'selected' ? 'selected' : 'new') as 'selected' | 'new',
+    enrichmentStatus: 'pending' as const,
+    researchStatus: 'none' as const,
+    capturedAt: l.capturedAt ?? now,
+    updatedAt: now,
+  }
+}
 
 // Per-session CSV/Excel import — lands rows directly in THIS session's Leads
 // or Selected tab (legacy `leads` table, scoped by projectId), instead of the
@@ -22,9 +53,10 @@ const MODE_META: Record<SessionImportMode, { title: string; blurb: string }> = {
   selected: { title: 'Import CSV/Excel to Selected', blurb: 'Bring in an outside list — lands here as selected, ready for research' },
 }
 
-export default function SessionCsvImport({ mode, projectId, onImported }: {
+export default function SessionCsvImport({ mode, projectId, newSessionId, onImported }: {
   mode: SessionImportMode
   projectId: number
+  newSessionId?: number   // this session's mirror row in the redesigned schema, if it has one
   onImported?: () => void
 }) {
   const fileRef = useRef<HTMLInputElement>(null)
@@ -105,6 +137,9 @@ export default function SessionCsvImport({ mode, projectId, onImported }: {
             const idx = sessionLeads.findIndex((l) => l.id === fresh.id)
             if (idx >= 0) sessionLeads[idx] = fresh
             if (fresh.status === 'selected') toQueue.push(fresh)
+            if (newSessionId !== undefined) {
+              await scrapedLeadRepo.upsertCapture(newSessionId, [{ ...toScrapedLeadPatch(fresh), normalizedName: fresh.normalizedName, companyName: fresh.companyName }]).catch(() => {})
+            }
           }
         } else {
           const id = await leadRepository.create(mapped)
@@ -113,6 +148,9 @@ export default function SessionCsvImport({ mode, projectId, onImported }: {
           if (fresh) {
             sessionLeads.push(fresh)
             if (fresh.status === 'selected') toQueue.push(fresh)
+            if (newSessionId !== undefined) {
+              await scrapedLeadRepo.upsertCapture(newSessionId, [{ ...toScrapedLeadPatch(fresh), normalizedName: fresh.normalizedName, companyName: fresh.companyName }]).catch(() => {})
+            }
           }
         }
       } catch {
