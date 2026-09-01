@@ -106,13 +106,26 @@ export async function runAutoValidationAndResearch(
         : `Step 1/3 — Enriching ${toEnrichCount} leads…`
     )
   }
+  // Mirror into scraped_leads periodically DURING the run, not just once at
+  // the end — reconcileScrapedForLeads was only called after the whole loop
+  // finished, so the workspace funnel's "Enriched" tile (which reads the
+  // scraped_leads mirror) sat frozen for the entire run even though leads
+  // were visibly being enriched one by one in the console/toasts.
+  let lastReconciled = 0
+  const enrichProgress = (done: number, total: number) => {
+    onProgress?.(done, total)
+    if (done - lastReconciled >= 20 || done === total) {
+      lastReconciled = done
+      reconcileScrapedForLeads(newLeads, 'enrichment').catch(() => {})
+    }
+  }
   try {
-    await runPreValidationEnrichment(newLeads, settings, apiKey, onProgress, shouldStop, onScopeResolved)
+    await runPreValidationEnrichment(newLeads, settings, apiKey, enrichProgress, shouldStop, onScopeResolved)
   } catch (err) {
     console.warn('[auto-pipeline] Enrichment error (non-fatal):', err)
   }
 
-  // Mirror enrichment into the new scraped_leads (local + new MSSQL).
+  // Final mirror pass in case the last chunk was smaller than the throttle step.
   reconcileScrapedForLeads(newLeads, 'enrichment').catch(() => {})
 
   if (await shouldStop()) return
@@ -162,6 +175,10 @@ export async function runAutoValidationAndResearch(
         await persistValidationBatch(chunkResults)
         results = results.concat(chunkResults)
         onProgress?.(Math.min(i + CHUNK, groupLeads.length), groupLeads.length)
+        // Mirror after every chunk, not just once at the end — otherwise the
+        // funnel's Scored/Relevant tiles sit frozen for the whole run even
+        // though the live feed and legacy table are updating per lead.
+        reconcileScrapedForLeads(chunk, 'validation').catch(() => {})
       }
     }
   } catch (err) {
@@ -277,8 +294,18 @@ export async function runPipelineStep(
     }
     console.log(`[pipeline-step] enrichment — ${targets.length} targets`)
     toast.info(`Re-enriching ${targets.length} leads…`)
+    // Mirror periodically DURING the run — otherwise the funnel's Enriched
+    // tile sits frozen until the entire (potentially very long) run finishes.
+    let lastReconciled = 0
+    const enrichProgress = (done: number, total: number) => {
+      onProgress?.(done, total)
+      if (done - lastReconciled >= 20 || done === total) {
+        lastReconciled = done
+        reconcileScrapedForLeads(targets, 'enrichment').catch(() => {})
+      }
+    }
     try {
-      await runPreValidationEnrichment(targets, settings, '', onProgress, shouldStop)
+      await runPreValidationEnrichment(targets, settings, '', enrichProgress, shouldStop)
     } catch (err) {
       console.warn('[pipeline-step] Enrichment error (non-fatal):', err)
     }
@@ -335,6 +362,9 @@ export async function runPipelineStep(
       await persistValidationBatch(chunkResults)
       results = results.concat(chunkResults)
       onProgress?.(Math.min(i + CHUNK, targets.length), targets.length)
+      // Mirror after every chunk — otherwise the funnel's Scored/Relevant
+      // tiles sit frozen until the entire run finishes.
+      reconcileScrapedForLeads(chunk, 'validation').catch(() => {})
     }
     if (results.length === 0) return { processed: 0, message: 'Validation stopped before any results' }
 
