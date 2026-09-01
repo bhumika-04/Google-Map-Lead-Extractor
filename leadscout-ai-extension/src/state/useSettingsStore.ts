@@ -42,9 +42,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch {}
 
     // 2. Override sensitive config from backend — no manual key entry needed
+    let backendReachable = false
     try {
       const res = await fetch(`${API_BASE}/api/config`, { signal: AbortSignal.timeout(4000) })
       if (res.ok) {
+        backendReachable = true
         const cfg = await res.json() as Record<string, string>
         for (const field of BACKEND_FIELDS) {
           const v = cfg[field]
@@ -60,6 +62,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
     if (!merged.businessProfile?.trim()) merged.businessProfile = DEFAULT_SETTINGS.businessProfile
     set({ settings: merged, loaded: true })
+
+    // load() only runs once on mount — if the backend happened to be down at
+    // that exact moment (e.g. `dotnet run` still starting), the dashboard
+    // would otherwise be stuck on a stale local fallback (empty or wrong key)
+    // for the rest of the tab's lifetime, even after the backend comes back
+    // online seconds later. Keep retrying quietly until it's reachable.
+    if (!backendReachable) {
+      setTimeout(() => { get().load() }, 15000)
+    }
   },
 
   // update() is only used for transient UI prefs (lastCity, searchPresets, theme).
