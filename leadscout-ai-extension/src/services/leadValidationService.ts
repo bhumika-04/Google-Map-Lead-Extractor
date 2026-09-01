@@ -29,77 +29,37 @@ function buildBatchPrompt(
     `${i + 1}. ID:${l.leadId} | "${l.name}" | Category: ${l.category || 'Unknown'} | City: ${l.city}${l.extra ? ` | ${l.extra}` : ''}`
   ).join('\n')
 
-  return `You are a B2B lead qualification scorer. Score each lead on a 100-point scale using the 5 dimensions below. Use all available data — company name, category, city, and any enrichment data provided.
+  return `You are a B2B lead qualification scorer.
 
-The MY BUSINESS description below is the ONLY source of truth for what industries, company types, and customer profile are relevant. Do not assume any specific industry (printing, packaging, or otherwise) beyond what MY BUSINESS actually describes — infer the target customer industry, typical company size, and product/software need entirely from that text.
+The MY BUSINESS description below is the COMPLETE and ONLY source of truth for
+this evaluation — if it defines its own rejection rules, scoring dimensions,
+or a threshold for what counts as "relevant", follow THOSE exactly. Do not
+invent, add, or fall back to any generic rejection rule, scoring dimension,
+or threshold that isn't stated in MY BUSINESS. Only if MY BUSINESS does NOT
+specify its own relevance threshold, default to: score >= 50 is relevant.
 
 MY BUSINESS:
 ${businessProfile}
 
-━━━ HARD REJECT RULES (apply first — if any match, score = 0, relevant = false) ━━━
-R1. Industry mismatch: the lead's company/category is clearly NOT in the target industry (or a directly adjacent one) described in MY BUSINESS above.
-R2. Excluded type: a single-counter micro retail/service operation with no real production or business operations behind it — not a company MY BUSINESS's product would meaningfully serve.
-R3. Too small: Annual Turnover explicitly stated as below ₹1 Crore (e.g. "5 Lakh or Less", "Below 1 Cr", "₹25 Lakh - ₹1 Cr") — or below whatever minimum company size MY BUSINESS specifies, if it specifies one. If turnover is unknown or estimated, do NOT reject on this rule.
-
-━━━ SCORING DIMENSIONS (only if no hard reject) ━━━
-
-DIM 1 — Industry Fit (0–30 pts)
-  30 = Exact match: the lead's industry/category is exactly the target customer type described in MY BUSINESS
-  20 = Strong adjacent: a closely related industry that MY BUSINESS's product would still clearly serve
-  10 = Borderline: allied industry with plausible production/operations relevant to MY BUSINESS
-   0 = No clear match (but wasn't hard-rejected above)
-
-DIM 2 — Company Scale (0–25 pts)
-  Use Annual Turnover if available, else Employee Count, else estimate from category/context.
-  25 = ₹10 Cr+ turnover OR 50+ employees
-  18 = ₹1–10 Cr turnover OR 20–50 employees
-  10 = Turnover unknown, estimated mid-size (10–20 employees inferred)
-   5 = Small but not micro (estimated 6–10 employees)
-   0 = Clearly micro / 1–5 employees (do not hard-reject unless R3 applies)
-
-DIM 3 — Product / Software Need (0–25 pts)
-  Judge this against whatever MY BUSINESS actually sells (ERP, compliance software, production tools, services, etc.) — not a fixed assumption.
-  25 = Clear operational need: the lead's scale/category strongly implies they'd need what MY BUSINESS sells
-  15 = Moderate operations: some need likely
-   5 = Possible need but unclear from available data
-   0 = No apparent need for what MY BUSINESS sells
-
-DIM 4 — Business Type (0–10 pts)
-  10 = Manufacturer / producer / plant operator (or MY BUSINESS's ideal operating model)
-   5 = Mixed producer + trader/distributor
-   0 = Pure trader / distributor / service agency with no production
-
-DIM 5 — Decision Maker Availability (0–10 pts)
-  10 = Named decision maker (MD/Owner/Director) known
-   5 = Role known but name unknown
-   0 = No decision maker info available
-
-━━━ THRESHOLDS ━━━
-80–100 = High Priority  → relevant: true
-60–79  = Good Lead      → relevant: true
-50–59  = Low Priority   → relevant: true, prefix reason with "LOW:"
-Below 50 = Reject/Hold  → relevant: false
-
-LEADS TO EVALUATE:
+LEADS TO EVALUATE (evaluate independently — do not let one lead's score or
+reasoning influence another's):
 ${leadLines}
 
-Return ONLY a valid JSON array, no markdown:
+For EACH lead, write "reason" as a short explanation SPECIFIC to that exact
+lead — reference its actual name, category, or data. Never reuse the same
+wording across two different leads, and never copy the example text below
+verbatim; it exists only to show the required JSON shape.
+
+Return ONLY a valid JSON array, no markdown, one object per lead in the same
+order as listed above:
 [
   {
     "leadId": <id>,
-    "icpScore": 85,
-    "icpStatus": "high_fit",
-    "relevant": true,
-    "reason": "High Priority — exact industry match, 200+ employees, ₹100-500 Cr, clear product need",
-    "scoreBreakdown": "Industry:30 Scale:25 Need:20 BizType:5 DM:5"
-  },
-  {
-    "leadId": <id>,
-    "icpScore": 0,
-    "icpStatus": "reject",
-    "relevant": false,
-    "reason": "R1: industry unrelated to MY BUSINESS's target customers",
-    "scoreBreakdown": "Industry:0 Scale:0 Need:0 BizType:0 DM:0"
+    "icpScore": <0-100 integer>,
+    "icpStatus": "<short label, e.g. high_fit | good_fit | low_priority | reject>",
+    "relevant": <true|false, per MY BUSINESS's own threshold>,
+    "reason": "<specific to this one lead>",
+    "scoreBreakdown": "<optional short breakdown>"
   }
 ]`
 }
@@ -133,7 +93,12 @@ function parseJsonArray(text: string): ValidationResult[] {
       ? r.icpStatus
       : icpStatusFromScore(icpScore)
 
-    const relevant = icpScore >= 50 && r.relevant !== false
+    // Trust the AI's own `relevant` verdict — it was told to apply the
+    // business profile's own threshold (which is often NOT 50, e.g. a
+    // looser profile using >=40). Hardcoding ">= 50" here silently
+    // overrode any custom threshold the profile actually specified. Only
+    // fall back to a >=50 default when the AI omits the field entirely.
+    const relevant = typeof r.relevant === 'boolean' ? r.relevant : icpScore >= 50
 
     // Providers occasionally return leadId as a numeric STRING ("1234" instead
     // of 1234) even though the prompt shows it as a bare number — the old
