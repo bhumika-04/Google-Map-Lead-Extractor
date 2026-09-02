@@ -18,6 +18,7 @@ import { MSG } from '@/types/messages'
 import { COUNTRIES, flag } from './SearchConsole'
 import { timeAgo } from '@/utils/date'
 import LeadTable from './LeadTable'
+import ResearchPage from './ResearchPage'
 import SessionCsvImport from './SessionCsvImport'
 import PipelineControl, { ValidationFeed } from './PipelineControl'
 import type { SearchProject } from '@/types/searchProject'
@@ -57,9 +58,6 @@ function computeScrapedStats(rows: ScrapedLead[]) {
 // Map a scraped_leads row into the shapes the workspace tables already render.
 function toSelectedRow(r: ScrapedLead): SelectedLead {
   return { leadId: r.id!, projectId: r.sessionId, companyName: r.companyName, icpScore: r.icpScore, category: r.category, phone: r.phone, city: r.city, selectedAt: r.updatedAt, validationReason: r.icpReason } as SelectedLead
-}
-function toResearchedRow(r: ScrapedLead): ResearchedLead {
-  return { leadId: r.id!, projectId: r.sessionId, companyName: r.companyName, decisionMaker: r.decisionMaker, email: r.email, industry: r.industry, annualTurnover: r.annualTurnover, teamSize: r.teamSize, researchedAt: r.researchedAt ?? r.updatedAt } as ResearchedLead
 }
 
 export default function SessionWorkspace({ projectId, onExit }: { projectId: number; onExit: () => void }) {
@@ -514,9 +512,17 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
             : <SelectedTable rows={selRows} selectedIds={selSelectedIds} onToggle={toggleSelRow} onToggleAll={toggleSelAll} />}
         </div>
       )}
-      {tab === 'researched' && (useNew
-        ? <ResearchedTable rows={researchedScraped.map(toResearchedRow)} />
-        : <ResearchedTable rows={resRows} />)}
+      {/* Full research detail (founded year, team members, certifications,
+          major clients, export markets, social accounts, sources visited,
+          pain points, current tech stack, hiring signals...) — reuses the
+          same rich view as the global Research Results page. It already
+          respects the session scope set above (setProjectScope), so it shows
+          exactly this session's researched leads with no extra plumbing. */}
+      {tab === 'researched' && (
+        <div className="flex flex-col min-h-0 flex-1">
+          <ResearchPage />
+        </div>
+      )}
       {tab === 'verified' && (useNew
         ? <VerifiedTable rows={verifiedScraped.map(toVerifiedRow)} />
         : <VerifiedTable rows={verifiedLegacy.map(toVerifiedRow)} />)}
@@ -584,38 +590,6 @@ function SelectedTable({ rows, selectedIds, onToggle, onToggleAll }: {
               <td className="px-3 py-2 text-gray-400">{r.category ?? '—'}</td>
               <td className="px-3 py-2 text-gray-300">{r.phone ?? '—'}</td>
               <td className="px-3 py-2 text-gray-400">{r.city ?? '—'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-function ResearchedTable({ rows }: { rows: ResearchedLead[] }) {
-  if (rows.length === 0) return <EmptyState label="No researched leads in this session yet — queue relevant leads for research." />
-  return (
-    <div className="flex-1 overflow-auto rounded-xl border border-gray-800">
-      <table className="w-full text-xs text-left">
-        <thead className="bg-gray-900 sticky top-0 z-10">
-          <tr className="text-gray-500">
-            <th className="px-3 py-2.5 font-medium">Company</th>
-            <th className="px-3 py-2.5 font-medium">Decision maker</th>
-            <th className="px-3 py-2.5 font-medium">Email</th>
-            <th className="px-3 py-2.5 font-medium">Industry</th>
-            <th className="px-3 py-2.5 font-medium">Turnover</th>
-            <th className="px-3 py-2.5 font-medium">Team</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.leadId} className="border-t border-gray-800/60 hover:bg-gray-800/40 transition-colors">
-              <td className="px-3 py-2 text-white font-medium">{r.companyName}</td>
-              <td className="px-3 py-2 text-gray-300">{r.decisionMaker ?? '—'}</td>
-              <td className="px-3 py-2 text-gray-300 truncate max-w-[160px]">{r.email ?? '—'}</td>
-              <td className="px-3 py-2 text-gray-400">{r.industry ?? '—'}</td>
-              <td className="px-3 py-2 text-gray-400">{r.annualTurnover ?? '—'}</td>
-              <td className="px-3 py-2 text-gray-400">{r.teamSize ?? '—'}</td>
             </tr>
           ))}
         </tbody>
