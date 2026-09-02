@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { Lead, LeadStatus, LeadFilter } from '@/types/lead'
 import { leadRepository } from '@/db/leadRepository'
+import { reconcileScrapedForLeads } from '@/services/scrapedReconcileService'
 
 /** Country/city scope set by the Markets page — LeadTable applies it on top of its own filters. */
 export interface MarketScope {
@@ -67,6 +68,13 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       leads: s.leads.map((l) => (l.id === id ? { ...l, status } : l)),
       detailLead: s.detailLead?.id === id ? { ...s.detailLead, status } : s.detailLead,
     }))
+    // Manually marking a lead selected/rejected from the Leads tab only wrote
+    // the legacy `leads` row — the session workspace's Selected tab reads
+    // exclusively from the scraped_leads mirror once one exists, so a manual
+    // selection here would silently never show up there. Mirror the status
+    // the same way the auto-pipeline does after validation.
+    const lead = get().leads.find((l) => l.id === id)
+    if (lead) reconcileScrapedForLeads([lead], 'validation').catch(() => {})
   },
 
   async updateLeadNotes(id, notes) {
