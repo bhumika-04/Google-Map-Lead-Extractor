@@ -9,7 +9,7 @@ import { runDeepResearch } from '@/services/deepResearchService'
 import { useSettingsStore } from '@/state/useSettingsStore'
 import { useLeadStore } from '@/state/useLeadStore'
 import { exportRowsToCSV, exportFullCSV, type ExportRowInput } from '@/utils/csvExport'
-import { exportToPdf } from '@/services/exportService'
+import { exportToPdf, exportToDoc, exportToExcel } from '@/services/exportService'
 import { OutreachPanel } from './OutreachPanel'
 import CopyBtn from './CopyBtn'
 
@@ -28,6 +28,7 @@ export default function ResearchPage() {
   const [results, setResults] = useState<EnrichedResult[]>([])
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<EnrichedResult | null>(null)
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const { projectScope } = useLeadStore()
 
   async function load() {
@@ -120,6 +121,16 @@ export default function ResearchPage() {
     exportFullCSV(headers, rows, `research-results-full-export-${Date.now()}.csv`)
   }
 
+  function handleExportExcel() {
+    exportToExcel(results, `research-results-${Date.now()}.xlsx`)
+  }
+
+  function handleExportWord() {
+    const leads = results.map((r) => r.lead).filter((l): l is Lead => !!l)
+    const researchMap = new Map(results.filter((r) => r.lead?.id).map((r) => [r.lead!.id!, r as ResearchResult]))
+    exportToDoc(leads, researchMap, `research-results-${Date.now()}.doc`)
+  }
+
   const conf = (r: ResearchResult) => Math.round(r.confidence * 100)
   const confColor = (r: ResearchResult) => {
     const c = conf(r)
@@ -144,36 +155,46 @@ export default function ResearchPage() {
     )
   }
 
+  const exportOptions = [
+    { label: 'CSV (Interakt format)',   hint: '12 columns, WhatsApp/CRM-ready', fn: handleExportCSV },
+    { label: 'Full CSV (all fields)',   hint: 'Every research field',          fn: handleExportFullCSV },
+    { label: 'Excel (.xlsx)',           hint: 'Every research field',          fn: handleExportExcel },
+    { label: 'Word (.doc)',             hint: 'One section per lead',          fn: handleExportWord },
+    { label: 'PDF',                     hint: 'One page per lead',             fn: () => exportToPdf(results) },
+  ]
+
   return (
-    <div className="flex-1 flex gap-4 min-h-0">
+    <div className="flex-1 flex gap-4 min-h-0" onClick={() => exportMenuOpen && setExportMenuOpen(false)}>
       {/* Left: result list */}
       <div className="w-72 shrink-0 flex flex-col gap-2 overflow-y-auto pr-1">
         <div className="flex items-center justify-between mb-1">
           <div className="text-xs text-gray-500">
             {results.length} researched {results.length === 1 ? 'lead' : 'leads'}
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="relative">
             <button
-              onClick={handleExportCSV}
-              title="Interakt/WhatsApp-compatible CSV (12 columns)"
-              className="text-xs px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded-lg transition-colors border border-gray-700"
+              onClick={(e) => { e.stopPropagation(); setExportMenuOpen((v) => !v) }}
+              className="text-xs px-2.5 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white rounded-lg border border-gray-700 transition-colors flex items-center gap-1"
             >
-              ⤓ CSV
+              ⤓ Export <span className="text-gray-600">{exportMenuOpen ? '▴' : '▾'}</span>
             </button>
-            <button
-              onClick={handleExportFullCSV}
-              title="Full research data CSV (all fields)"
-              className="text-xs px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded-lg transition-colors border border-gray-700"
-            >
-              ⤓ Full CSV
-            </button>
-            <button
-              onClick={() => exportToPdf(results)}
-              title="Export as PDF — one page per lead with all research data"
-              className="text-xs px-2 py-1 bg-red-950/50 hover:bg-red-900/60 text-red-400 hover:text-red-300 rounded-lg transition-colors border border-red-900/50"
-            >
-              ⤓ PDF
-            </button>
+            {exportMenuOpen && (
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className="absolute right-0 top-full mt-1 w-56 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-20 py-1 overflow-hidden"
+              >
+                {exportOptions.map((opt) => (
+                  <button
+                    key={opt.label}
+                    onClick={() => { opt.fn(); setExportMenuOpen(false) }}
+                    className="w-full text-left px-3 py-2 hover:bg-gray-800 transition-colors"
+                  >
+                    <div className="text-xs text-gray-200">{opt.label}</div>
+                    <div className="text-[11px] text-gray-600">{opt.hint}</div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
         {results.map((r) => (

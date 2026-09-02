@@ -110,6 +110,62 @@ ${sections}
   downloadBlob(blob, filename)
 }
 
+// ─── Excel Export ───────────────────────────────────────────────────────────────
+// Same field set as the "Full CSV" export, written as a real .xlsx workbook.
+// The xlsx library is already bundled for spreadsheet import (utils/spreadsheet.ts);
+// this reuses it for writing instead of reading.
+
+export async function exportToExcel(results: EnrichedResult[], filename = 'research-results.xlsx'): Promise<void> {
+  const XLSX = await import('xlsx')
+
+  const rows = results.map((r) => ({
+    'Company Name': r.lead?.companyName ?? '',
+    'City': r.lead?.city ?? '',
+    'Category': r.lead?.keyword ?? '',
+    'Address': r.lead?.address ?? '',
+    'Phone': r.lead?.phone ?? '',
+    'Website': r.website ?? '',
+    'Email': r.email ?? '',
+    'Alternate Phone': r.alternatePhone ?? '',
+    'WhatsApp': r.whatsapp ?? '',
+    'Decision Maker': r.decisionMaker ?? '',
+    'Decision Maker LinkedIn': r.decisionMakerLinkedIn ?? '',
+    'LinkedIn Company': r.linkedIn ?? '',
+    'Facebook': r.facebook ?? '',
+    'Instagram': r.instagram ?? '',
+    'Twitter': r.twitter ?? '',
+    'YouTube': r.youtube ?? '',
+    'Industry': r.industry ?? '',
+    'Company Type': r.companyType ?? '',
+    'GST Number': r.gstNumber ?? '',
+    'CIN': r.lead?.cin ?? '',
+    'Supplier/Buyer Type': r.supplierBuyerType ?? '',
+    'Employee Count': r.employeeCount ?? '',
+    'Annual Turnover': r.annualTurnover ?? '',
+    'Year Founded': r.yearFounded ?? '',
+    'Headquarters': r.headquarters ?? '',
+    'Tagline': r.tagline ?? '',
+    'Summary': r.summary ?? '',
+    'Services': r.services?.join('; ') ?? '',
+    'Certifications': r.certifications?.join('; ') ?? '',
+    'Major Clients': r.majorClients?.join('; ') ?? '',
+    'Export Markets': r.exportMarkets?.join('; ') ?? '',
+    'Current Software': r.currentSoftware?.join('; ') ?? '',
+    'Expansion Signals': r.expansionSignals?.join('; ') ?? '',
+    'Pain Points': r.painPoints?.join('; ') ?? '',
+    'Team Members': r.teamMembers?.map((m) => m.role ? `${m.name} (${m.role})` : m.name).join('; ') ?? '',
+    'Confidence': Math.round(r.confidence * 100),
+    'Source URL': r.sourceUrl ?? '',
+    'Researched At': r.createdAt,
+  }))
+
+  const ws = XLSX.utils.json_to_sheet(rows)
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, 'Research Results')
+  const buf: ArrayBuffer = XLSX.write(wb, { type: 'array', bookType: 'xlsx' })
+  downloadBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), filename)
+}
+
 // ─── PDF Export ───────────────────────────────────────────────────────────────
 // Opens a print-optimised window. One lead per page. Browser File → Save as PDF.
 
