@@ -47,6 +47,7 @@ export interface EvidenceResponse {
   decisionMakers:  EvidencePersonField[]
   summary:         EvidenceField
   productsServices: EvidenceField
+  gstNumber:       EvidenceField
   icpFit:          IcpFit
   overallConfidence: number
   // LinkedIn-specific (populated only when sourceType === 'linkedin')
@@ -74,6 +75,7 @@ export interface FlatExtractedData {
   summary?: string
   tagline?: string
   services?: string[]
+  gstNumber?: string
   employeeCount?: string
   annualTurnover?: string
   annualTurnoverCurrency?: string   // detected currency code (OMR, AED, INR…)
@@ -115,6 +117,7 @@ function buildEvidencePrompt(
   sourceLanguage?: string,
 ): string {
   const isLinkedIn = sourceType === 'linkedin'
+  const isDirectory = sourceType === 'company_directory' || sourceType === 'indiamart' || sourceType === 'tradeindia'
   const isNonEnglish = !!sourceLanguage && sourceLanguage !== 'en'
 
   const translationRules = isNonEnglish ? `
@@ -151,6 +154,8 @@ RULES:
 - If the evidence does not clearly refer to "${companyName}" in ${city}, set overallConfidence below 0.4 and leave most fields null.
 - Every non-null field must reference sourceUrl = "${sourceUrl}".
 - Return null for any field not found in the evidence.${translationRules}
+- gstNumber: the 15-character Indian GSTIN (format: 2 digit state code + 10 char PAN + entity code + "Z" + checksum, e.g. "24AAACC1206D1Z0"). Often printed on IndiaMART/JustDial listings, invoices, or a website's footer/contact page. Null if not found.${isDirectory ? `
+- productsServices: this is a directory/marketplace listing (IndiaMART, TradeIndia, JustDial, MagicPin, etc.) — these commonly show a full product list, menu, or catalogue. Capture EVERY distinct product/service/menu item listed, comma-separated, not just a one-line summary.` : ''}
 
 ICP FIT ASSESSMENT — judge fit against MY BUSINESS below, not any assumed industry:
 MY BUSINESS: ${businessProfile}
@@ -170,6 +175,7 @@ Return ONLY valid JSON — no markdown. Every string "value" in English; "origin
   "decisionMakers": [{ "name": null, "designation": null, "originalQuote": null, "sourceUrl": "${sourceUrl}", "confidence": 0 }],
   "summary": { "value": null, "sourceUrl": "${sourceUrl}", "confidence": 0 },
   "productsServices": { "value": null, "originalQuote": null, "sourceUrl": "${sourceUrl}", "confidence": 0 },
+  "gstNumber": { "value": null, "originalQuote": null, "sourceUrl": "${sourceUrl}", "confidence": 0 },
   "icpFit": { "status": "low_fit", "reason": "", "confidence": 0 },
   "overallConfidence": 0${linkedInSchema}
 }`
@@ -263,6 +269,7 @@ export function flattenEvidenceResponse(ev: EvidenceResponse, sourceLanguage?: s
   collect('annualTurnover',   ev.annualTurnover)
   collect('yearFounded',      ev.yearFounded)
   collect('productsServices', ev.productsServices)
+  collect('gstNumber',        ev.gstNumber)
   collect('decisionMaker',    primaryDecisionMaker)
 
   // Deterministic normalizers — additions on top, originals preserved
@@ -288,6 +295,7 @@ export function flattenEvidenceResponse(ev: EvidenceResponse, sourceLanguage?: s
       .map((d) => ({ name: d.name!, role: d.designation ?? '' })),
     summary:       fieldVal(ev.summary),
     services:      services ? [services] : undefined,
+    gstNumber:     fieldVal(ev.gstNumber),
     icpFit:        ev.icpFit,
     confidence:    ev.overallConfidence ?? 0,
     originalQuotes: Object.keys(originalQuotes).length > 0 ? originalQuotes : undefined,

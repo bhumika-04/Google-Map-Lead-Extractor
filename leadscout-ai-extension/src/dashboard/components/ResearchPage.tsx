@@ -94,24 +94,27 @@ export default function ResearchPage() {
       'Website', 'Email', 'Alternate Phone', 'WhatsApp',
       'Decision Maker', 'Decision Maker LinkedIn',
       'LinkedIn Company', 'Facebook', 'Instagram', 'Twitter', 'YouTube',
-      'Industry', 'Company Type', 'Supplier/Buyer Type',
+      'Industry', 'Company Type', 'GST Number', 'CIN', 'Supplier/Buyer Type',
       'Employee Count', 'Annual Turnover', 'Year Founded', 'Headquarters',
       'Tagline', 'Summary',
       'Services', 'Certifications', 'Major Clients', 'Export Markets',
       'Current Software', 'Expansion Signals', 'Pain Points',
-      'Team Members', 'Confidence', 'Source URL', 'Researched At',
+      'Team Members', 'LinkedIn Employees', 'LinkedIn Followers',
+      'Confidence', 'Source URL', 'Researched At',
     ]
     const rows = results.map((r) => [
       r.lead?.companyName, r.lead?.city, r.lead?.keyword, r.lead?.address, r.lead?.phone,
       r.website, r.email, r.alternatePhone, r.whatsapp,
       r.decisionMaker, r.decisionMakerLinkedIn,
       r.linkedIn, r.facebook, r.instagram, r.twitter, r.youtube,
-      r.industry, r.companyType, r.supplierBuyerType,
+      r.industry, r.companyType, r.gstNumber, r.lead?.cin, r.supplierBuyerType,
       r.employeeCount, r.annualTurnover, r.yearFounded, r.headquarters,
       r.tagline, r.summary,
       r.services?.join('; '), r.certifications?.join('; '), r.majorClients?.join('; '), r.exportMarkets?.join('; '),
       r.currentSoftware?.join('; '), r.expansionSignals?.join('; '), r.painPoints?.join('; '),
       r.teamMembers?.map((m) => m.role ? `${m.name} (${m.role})` : m.name).join('; '),
+      (() => { try { return (JSON.parse(r.lead?.linkedinPeople ?? '[]') as { name: string }[]).map((p) => p.name).join('; ') } catch { return '' } })(),
+      r.lead?.linkedinFollowers,
       Math.round(r.confidence * 100), r.sourceUrl, r.createdAt,
     ])
     exportFullCSV(headers, rows, `research-results-full-export-${Date.now()}.csv`)
@@ -280,7 +283,9 @@ function ResultDetail({ result }: { result: EnrichedResult }) {
 
   const hasContact = !!(result.email || result.alternatePhone || result.whatsapp ||
     result.website || result.linkedIn || result.facebook || result.instagram ||
-    result.twitter || result.youtube || (result.teamMembers?.length ?? 0) > 0)
+    result.twitter || result.youtube || (result.teamMembers?.length ?? 0) > 0 ||
+    result.lead?.linkedinFollowers || result.lead?.linkedinAbout ||
+    result.lead?.linkedinSpecialties || result.lead?.linkedinPeople)
 
   const hasPersona = !!(
     result.decisionMaker ||
@@ -431,6 +436,8 @@ function BusinessTab({ result }: { result: EnrichedResult }) {
           {result.yearFounded    && <FactCell label="Founded"         value={String(result.yearFounded)} />}
           {result.companyType    && <FactCell label="Legal Type"      value={result.companyType} />}
           {result.industry       && <FactCell label="Industry"        value={result.industry} />}
+          {result.gstNumber      && <FactCell label="GST Number"      value={result.gstNumber} />}
+          {result.lead?.cin      && <FactCell label="CIN"             value={result.lead.cin} />}
           {result.lead?.city     && <FactCell label="City"            value={result.lead.city} />}
           {result.lead?.keyword  && <FactCell label="Category"        value={result.lead.keyword} />}
           {result.supplierBuyerType && (
@@ -807,6 +814,69 @@ function ContactTab({ result, hasData }: { result: EnrichedResult; hasData: bool
           </div>
         </Card>
       )}
+
+      {/* LinkedIn company page intelligence — captured automatically when
+          research visits the company's LinkedIn page, independent of the
+          manual "Deep Research" social scan below. */}
+      {(result.lead?.linkedinFollowers || result.lead?.linkedinAbout || result.lead?.linkedinSpecialties) && (
+        <Card title="LinkedIn Company Page">
+          <div className="space-y-3">
+            {(result.lead.linkedinFollowers || result.lead.linkedinSpecialties) && (
+              <div className="grid grid-cols-2 gap-2">
+                {result.lead.linkedinFollowers && (
+                  <div className="bg-gray-800 rounded-lg px-3 py-2">
+                    <div className="text-xs text-gray-500 mb-0.5">Followers</div>
+                    <div className="text-blue-200 font-semibold">{result.lead.linkedinFollowers}</div>
+                  </div>
+                )}
+                {result.lead.linkedinSpecialties && (
+                  <div className={`bg-gray-800 rounded-lg px-3 py-2 ${!result.lead.linkedinFollowers ? 'col-span-2' : ''}`}>
+                    <div className="text-xs text-gray-500 mb-1">Specialties</div>
+                    <div className="flex flex-wrap gap-1">
+                      {result.lead.linkedinSpecialties.split(',').map((s) => s.trim()).filter(Boolean).map((s) => (
+                        <span key={s} className="text-xs px-2 py-0.5 bg-blue-950 border border-blue-800 text-blue-300 rounded-full">{s}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {result.lead.linkedinAbout && (
+              <div>
+                <div className="text-xs text-gray-500 mb-1">About</div>
+                <div className="text-sm text-gray-300 leading-relaxed line-clamp-4">{result.lead.linkedinAbout}</div>
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {/* Employees found on the LinkedIn company /people/ page — more
+          authoritative than "Team Members" below (real profile URLs, not
+          AI-inferred names), when it was reachable. */}
+      {result.lead?.linkedinPeople && (() => {
+        let people: { name: string; title: string; profileUrl?: string }[] = []
+        try { people = JSON.parse(result.lead.linkedinPeople) } catch { return null }
+        if (people.length === 0) return null
+        return (
+          <Card title={`Employees on LinkedIn (${people.length})`}>
+            <div className="space-y-2 max-h-72 overflow-y-auto">
+              {people.map((p, i) => (
+                <div key={i} className="flex items-center justify-between gap-2 bg-gray-800/60 rounded-lg px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="text-sm text-white font-medium truncate">{p.name}</div>
+                    {p.title && <div className="text-xs text-gray-500 truncate">{p.title}</div>}
+                  </div>
+                  {p.profileUrl && (
+                    <a href={p.profileUrl} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+                      className="text-xs text-blue-400 hover:text-blue-300 shrink-0">View ↗</a>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Card>
+        )
+      })()}
 
       {/* Team members */}
       {result.teamMembers && result.teamMembers.length > 0 && (

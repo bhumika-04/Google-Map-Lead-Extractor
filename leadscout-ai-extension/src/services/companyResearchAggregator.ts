@@ -23,6 +23,7 @@ interface ExtractedData {
   summary?: string
   tagline?: string
   services?: string[]
+  gstNumber?: string
   employeeCount?: string
   annualTurnover?: string
   yearFounded?: number
@@ -45,7 +46,7 @@ const SCALAR_FIELDS: (keyof ExtractedData)[] = [
   'decisionMaker', 'decisionMakerLinkedIn', 'email', 'alternatePhone', 'website', 'linkedIn',
   'facebook', 'instagram', 'twitter', 'youtube', 'whatsapp', 'summary', 'tagline',
   'employeeCount', 'annualTurnover', 'yearFounded', 'companyType', 'industry', 'headquarters',
-  'supplierBuyerType',
+  'supplierBuyerType', 'gstNumber',
 ]
 
 const ARRAY_FIELDS: (keyof ExtractedData)[] = [
@@ -140,6 +141,7 @@ export function aggregateCompanyResearch(
     ownerName:       merged.decisionMaker,
     directors:       merged.teamMembers?.map((m) => `${m.name} (${m.role})`).join('; '),
     productsServices: merged.services?.join(', '),
+    gstNumber:       merged.gstNumber,
     businessType:    merged.companyType,
     teamSize:        merged.employeeCount,
     turnover:        merged.annualTurnover,
@@ -168,5 +170,6 @@ export function mapToLegacyResearchResult(
     decisionMakerLinkedIn: merged.decisionMakerLinkedIn ?? result.decisionMakerLinkedIn,
     supplierBuyerType:     merged.supplierBuyerType     ?? result.supplierBuyerType,
     exportMarkets:         merged.exportMarkets?.length  ? merged.exportMarkets : result.exportMarkets,
+    gstNumber:             merged.gstNumber             ?? result.gstNumber,
   }
 }

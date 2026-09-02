@@ -82,6 +82,7 @@ export interface CompanyResearch {
   ownerName?: string
   directors?: string
   productsServices?: string
+  gstNumber?: string
   businessType?: string
   teamSize?: string
   turnover?: string

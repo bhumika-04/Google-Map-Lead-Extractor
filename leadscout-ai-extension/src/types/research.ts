@@ -19,6 +19,7 @@ export interface ResearchResult {
   summary?: string
   tagline?: string
   services?: string[]
+  gstNumber?: string
   employeeCount?: string
   annualTurnover?: string
   yearFounded?: number
