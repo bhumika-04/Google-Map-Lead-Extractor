@@ -348,7 +348,7 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
       )}
       {tab === 'selected' && (
         <div className="flex flex-col gap-3 min-h-0 flex-1">
-          <SessionCsvImport mode="selected" projectId={projectId} />
+          <SessionCsvImport mode="selected" projectId={projectId} newSessionId={project?.newSessionId} />
           {useNew
             ? <SelectedTable rows={selectedScraped.map(toSelectedRow)} />
             : <SelectedTable rows={selRows} />}
