@@ -47,19 +47,30 @@ function makeRepo<T extends PipelineLead>(table: () => Table<T, number>) {
       await table().delete(id)
     },
 
-    // Upsert on (sessionId + normalizedName) — never clobbers enrichment/validation/
-    // research fields already present (mirrors the server's save-batch MERGE).
+    // Upsert matching googleMapsUrl -> phone -> (normalizedName + city), never
+    // clobbering enrichment/validation/research fields already present (mirrors
+    // the server's save-batch MERGE). Matching by normalizedName alone would
+    // collapse genuinely different companies that share a name across cities
+    // into one row — a real case for any multi-city session, not just CSV
+    // imports (see findScrapedMatch in SessionCsvImport.tsx for the same fix
+    // applied to that path).
     async upsertCapture(sessionId: number, leads: Array<Partial<T> & { normalizedName: string; companyName: string }>): Promise<number> {
       let n = 0
       await db.transaction('rw', table(), async () => {
+        const rows = await table().where('sessionId').equals(sessionId).toArray()
         for (const l of leads) {
-          const existing = await table().where('sessionId').equals(sessionId).and((x) => x.normalizedName === l.normalizedName).first()
+          const anyL = l as any
+          const existing =
+            (anyL.googleMapsUrl && rows.find((x: any) => x.googleMapsUrl === anyL.googleMapsUrl)) ||
+            (anyL.phone && rows.find((x: any) => x.phone === anyL.phone)) ||
+            rows.find((x) => x.normalizedName === l.normalizedName && ((x as any).city ?? '') === (anyL.city ?? ''))
           if (existing) {
             const { status, notes, tags, ...capture } = l as any
             await table().update(existing.id!, { ...capture, updatedAt: nowISO() } as Partial<T>)
+            Object.assign(existing, capture)
           } else {
             const now = nowISO()
-            await table().add({
+            const record = {
               status: 'new',
               enrichmentStatus: 'pending',
               researchStatus: 'none',
@@ -67,7 +78,9 @@ function makeRepo<T extends PipelineLead>(table: () => Table<T, number>) {
               updatedAt: now,
               ...l,
               sessionId,
-            } as unknown as T)
+            } as unknown as T
+            const id = await table().add(record)
+            rows.push({ ...record, id })
           }
           n++
         }

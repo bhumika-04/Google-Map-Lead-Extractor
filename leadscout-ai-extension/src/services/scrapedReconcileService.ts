@@ -35,11 +35,24 @@ export async function reconcileScrapedFromLeads(
     leadRepository.getByFilter({ projectId }),
     scrapedLeadRepo.getBySession(sid),
   ])
-  const byName = new Map(scraped.map((s) => [s.normalizedName, s]))
+  // Match googleMapsUrl -> phone -> (normalizedName + city), same priority as
+  // findScrapedMatch in SessionCsvImport.tsx. Matching by name alone collapses
+  // same-named companies from different cities onto one scraped_leads row, so
+  // every legacy lead but the last processed with that name silently never
+  // gets its validation/enrichment fields mirrored — the workspace's
+  // Scored/Relevant tiles then undercount even though the legacy `leads`
+  // table and the live validation feed are both correct.
+  const byUrl     = new Map(scraped.filter((s) => s.googleMapsUrl).map((s) => [s.googleMapsUrl!, s]))
+  const byPhone   = new Map(scraped.filter((s) => s.phone).map((s) => [s.phone!, s]))
+  const byNameCity = new Map(scraped.map((s) => [`${s.normalizedName}|${s.city ?? ''}`, s]))
+  const findMatch = (ol: Lead): ScrapedLead | undefined =>
+    (ol.googleMapsUrl && byUrl.get(ol.googleMapsUrl)) ||
+    (ol.phone && byPhone.get(ol.phone)) ||
+    byNameCity.get(`${ol.normalizedName}|${ol.city ?? ''}`)
   const validationItems: Array<{ mssqlId: number; lead: ScrapedLead }> = []
 
   for (const ol of oldLeads) {
-    const sl = byName.get(ol.normalizedName)
+    const sl = findMatch(ol)
     if (!sl?.id) continue
 
     const patch: Partial<ScrapedLead> = { status: mapStatus(ol.status) }
@@ -85,7 +98,10 @@ export async function mirrorResearchToScraped(lead: Lead, result: ResearchResult
   const project = await searchProjectRepository.getById(lead.projectId).catch(() => undefined)
   if (!project?.newSessionId) return
   const scraped = await scrapedLeadRepo.getBySession(project.newSessionId)
-  const sl = scraped.find((s) => s.normalizedName === lead.normalizedName)
+  const sl =
+    (lead.googleMapsUrl && scraped.find((s) => s.googleMapsUrl === lead.googleMapsUrl)) ||
+    (lead.phone && scraped.find((s) => s.phone === lead.phone)) ||
+    scraped.find((s) => s.normalizedName === lead.normalizedName && (s.city ?? '') === (lead.city ?? ''))
   if (!sl?.id) return
 
   const patch: Partial<ScrapedLead> = {
