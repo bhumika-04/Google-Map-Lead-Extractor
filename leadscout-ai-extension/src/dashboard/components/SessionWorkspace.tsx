@@ -11,6 +11,8 @@ import { updateSessionInSql } from '@/services/pipelineSyncService'
 import { useLeadStore } from '@/state/useLeadStore'
 import { toast } from '@/state/useToastStore'
 import { confirmDialog } from '@/state/useConfirmStore'
+import { activityLogRepository } from '@/db/activityLogRepository'
+import { exportRowsToCSV, exportFileName, type ExportRowInput } from '@/utils/csvExport'
 import { MSG } from '@/types/messages'
 import { COUNTRIES, flag } from './SearchConsole'
 import { timeAgo } from '@/utils/date'
@@ -155,6 +157,43 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     if (!await confirmDialog(`Re-run ${STEP_LABEL[step]} for this session? Leads already past this step will be reprocessed.`, { confirmLabel: 'Re-run' })) return
     await chrome.runtime.sendMessage({ type: MSG.PIPELINE_RUN_STEP, payload: { projectId, step, force: true } }).catch(() => {})
     toast.info(`Re-running ${STEP_LABEL[step]}…`)
+  }
+
+  function exportSelected() {
+    const rows: ExportRowInput[] = useNew
+      ? selectedScraped.map((r) => ({
+          companyName: r.companyName,
+          city: r.city,
+          phone: r.phone,
+          email: r.email,
+          website: r.website,
+          category: r.category,
+          address: r.address,
+          rating: r.rating,
+          icpScore: r.icpScore,
+          icpStatus: r.icpStatus,
+          turnover: r.annualTurnover,
+          teamSize: r.teamSize,
+          coreMember: r.decisionMaker,
+          workingDomain: r.industry,
+          companyType: r.companyType,
+          creationDate: r.capturedAt,
+        }))
+      : selRows.map((r) => ({
+          companyName: r.companyName,
+          city: r.city,
+          phone: r.phone,
+          website: r.website,
+          category: r.category,
+          rating: r.rating,
+          icpScore: r.icpScore,
+          icpStatus: r.icpStatus,
+          creationDate: r.selectedAt,
+        }))
+    if (rows.length === 0) { toast.info('No selected leads to export yet'); return }
+    exportRowsToCSV(rows, exportFileName(`${project?.name ?? 'session'}-selected`))
+    activityLogRepository.log('export_completed', `Exported ${rows.length} selected leads (${project?.name ?? 'session'})`, projectId).catch(() => {})
+    toast.success(`Exported ${rows.length} selected leads`)
   }
 
   async function queueRelevantForResearch() {
@@ -348,7 +387,15 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
       )}
       {tab === 'selected' && (
         <div className="flex flex-col gap-3 min-h-0 flex-1">
-          <SessionCsvImport mode="selected" projectId={projectId} newSessionId={project?.newSessionId} />
+          <div className="flex items-start gap-2">
+            <div className="flex-1 min-w-0">
+              <SessionCsvImport mode="selected" projectId={projectId} newSessionId={project?.newSessionId} />
+            </div>
+            <button
+              onClick={exportSelected}
+              className="shrink-0 text-xs px-3.5 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors"
+            >↓ Export CSV</button>
+          </div>
           {useNew
             ? <SelectedTable rows={selectedScraped.map(toSelectedRow)} />
             : <SelectedTable rows={selRows} />}
