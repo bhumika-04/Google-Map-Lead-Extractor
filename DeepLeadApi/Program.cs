@@ -319,6 +319,27 @@ app.MapPost("/api/leads/{kind}/save-batch", async (string kind, SaveBatchIn body
 // failed request.
 static string? Trunc(string? s, int max) => s == null ? null : (s.Length > max ? s[..max] : s);
 
+// SQL Server picks a "deadlock victim" and kills its transaction whenever two
+// requests' multi-row writes lock rows in a different order — expected,
+// occasional behavior for any endpoint that updates many rows per call, not a
+// bug in itself. The right response is to retry the whole transaction (it's
+// guaranteed to not be mid-write), not to let it bubble up as a 500.
+static async Task<T> WithDeadlockRetry<T>(Func<Task<T>> action, int maxAttempts = 3)
+{
+    for (var attempt = 1; ; attempt++)
+    {
+        try
+        {
+            return await action();
+        }
+        catch (SqlException ex) when (ex.Number == 1205 && attempt < maxAttempts)
+        {
+            Console.Error.WriteLine($"[deadlock-retry] Attempt {attempt}/{maxAttempts} deadlocked — retrying");
+            await Task.Delay(150 * attempt);
+        }
+    }
+}
+
 // Enrichment result → inline columns + enrichment_json.
 app.MapPut("/api/leads/{kind}/{id:int}/enrichment", async (string kind, int id, EnrichmentIn body) =>
 {
@@ -384,21 +405,28 @@ app.MapPost("/api/leads/{kind}/validate-bulk", async (string kind, ValidationBul
 {
     string table;
     try { table = LeadTable(kind); } catch (ArgumentException e) { return Results.BadRequest(new { error = e.Message }); }
-    using var db = Db();
-    await db.OpenAsync();
-    using var tx = db.BeginTransaction();
-    var sql = $"""
-        UPDATE {table} SET validation_status=@ValidationStatus, icp_score=@IcpScore, icp_status=@IcpStatus,
-          icp_reason=@IcpReason, score_breakdown_json=@ScoreBreakdownJson,
-          validated_at=SYSUTCDATETIME(), updated_at=SYSUTCDATETIME() WHERE id=@Id;
-        """;
-    foreach (var v in body.Items)
-        await db.ExecuteAsync(sql, new {
-            v.Id, ValidationStatus = Trunc(v.ValidationStatus, 20), v.IcpScore,
-            IcpStatus = Trunc(v.IcpStatus, 30), v.IcpReason, v.ScoreBreakdownJson,
-        }, tx);
-    tx.Commit();
-    return Results.Ok(new { updated = body.Items.Length });
+    var updated = await WithDeadlockRetry(async () =>
+    {
+        using var db = Db();
+        await db.OpenAsync();
+        using var tx = db.BeginTransaction();
+        var sql = $"""
+            UPDATE {table} SET validation_status=@ValidationStatus, icp_score=@IcpScore, icp_status=@IcpStatus,
+              icp_reason=@IcpReason, score_breakdown_json=@ScoreBreakdownJson,
+              validated_at=SYSUTCDATETIME(), updated_at=SYSUTCDATETIME() WHERE id=@Id;
+            """;
+        // Always touch rows in ascending id order — two overlapping transactions
+        // that lock the same rows in different orders is exactly what produces a
+        // deadlock (Error 1205) instead of one simply waiting behind the other.
+        foreach (var v in body.Items.OrderBy(v => v.Id))
+            await db.ExecuteAsync(sql, new {
+                v.Id, ValidationStatus = Trunc(v.ValidationStatus, 20), v.IcpScore,
+                IcpStatus = Trunc(v.IcpStatus, 30), v.IcpReason, v.ScoreBreakdownJson,
+            }, tx);
+        tx.Commit();
+        return body.Items.Length;
+    });
+    return Results.Ok(new { updated });
 });
 
 // Deep research result → research columns + refresh intel scalars research found.

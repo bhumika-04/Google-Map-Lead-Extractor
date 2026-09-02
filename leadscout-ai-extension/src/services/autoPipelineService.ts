@@ -178,7 +178,13 @@ export async function runAutoValidationAndResearch(
         // Mirror after every chunk, not just once at the end — otherwise the
         // funnel's Scored/Relevant tiles sit frozen for the whole run even
         // though the live feed and legacy table are updating per lead.
-        reconcileScrapedForLeads(chunk, 'validation').catch(() => {})
+        // AWAITED (not fire-and-forget): reconcile re-scans and re-sends every
+        // validated lead in the project so far, not just this chunk, so two
+        // of these in flight at once race overlapping multi-row UPDATEs
+        // against scraped_leads in MSSQL — the direct cause of "Transaction
+        // was deadlocked on lock resources" crashes in validate-bulk once a
+        // session had enough leads for chunks to overlap in-flight.
+        await reconcileScrapedForLeads(chunk, 'validation').catch(() => {})
       }
     }
   } catch (err) {
@@ -200,7 +206,7 @@ export async function runAutoValidationAndResearch(
   // Mirror validation/ICP into the new scraped_leads — this is also what
   // pushes the result to MSSQL (via saveValidationBulkToSql in
   // pipelineSyncService.ts, /api/leads/{kind}/validate-bulk).
-  reconcileScrapedForLeads(freshLeads, 'validation').catch(() => {})
+  await reconcileScrapedForLeads(freshLeads, 'validation').catch(() => {})
 
   onPhaseChange?.('validation_completed')
 
@@ -346,12 +352,14 @@ export async function runPipelineStep(
       results = results.concat(chunkResults)
       onProgress?.(Math.min(i + CHUNK, targets.length), targets.length)
       // Mirror after every chunk — otherwise the funnel's Scored/Relevant
-      // tiles sit frozen until the entire run finishes.
-      reconcileScrapedForLeads(chunk, 'validation').catch(() => {})
+      // tiles sit frozen until the entire run finishes. Awaited: see the
+      // matching comment in runAutoValidationAndResearch — overlapping
+      // un-awaited calls here raced multi-row MSSQL UPDATEs and deadlocked.
+      await reconcileScrapedForLeads(chunk, 'validation').catch(() => {})
     }
     if (results.length === 0) return { processed: 0, message: 'Validation stopped before any results' }
 
-    reconcileScrapedForLeads(targets, 'validation').catch(() => {})
+    await reconcileScrapedForLeads(targets, 'validation').catch(() => {})
 
     const relevantCount = results.filter((r) => r.relevant).length
     const msg = `Validation done — ${results.length} scored, ${relevantCount} relevant`
