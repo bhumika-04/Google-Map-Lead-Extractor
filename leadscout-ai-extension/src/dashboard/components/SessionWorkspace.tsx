@@ -124,7 +124,14 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
   }, [project?.newSessionId])
 
   const useNew = project?.newSessionId !== undefined && scraped.length > 0
-  const selectedScraped = useMemo(() => scraped.filter((r) => r.status === 'selected'), [scraped])
+  // Same criteria as computeScrapedStats' "relevant" count below — a row can
+  // have validationStatus: 'relevant' without status having been separately
+  // promoted to 'selected' yet (reconcile patches these independently), so
+  // matching only on status here made the Selected tab undercount against
+  // the funnel's own Relevant tile even though both read the same data.
+  const selectedScraped = useMemo(() => scraped.filter((r) =>
+    r.validationStatus === 'relevant' || r.status === 'selected' || r.status.startsWith('research')
+  ), [scraped])
   const researchedScraped = useMemo(() => scraped.filter((r) => r.researchStatus === 'completed'), [scraped])
   const s = useMemo(() => (useNew ? computeScrapedStats(scraped) : computeStats(leads)), [useNew, scraped, leads])
 
