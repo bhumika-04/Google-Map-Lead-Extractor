@@ -68,7 +68,11 @@ BEGIN
     tags_json             NVARCHAR(MAX)  NULL,
     -- Enrichment (AI) — scalar
     team_size             NVARCHAR(50)   NULL,
+    team_size_verified    BIT            NULL,   -- true = confirmed via Verify from Google; NULL/false = AI estimate
+    team_size_estimate    NVARCHAR(50)   NULL,   -- pre-verification AI estimate, kept for side-by-side comparison
     annual_turnover       NVARCHAR(80)   NULL,
+    turnover_verified     BIT            NULL,   -- true = confirmed via Verify from Google; NULL/false = AI estimate
+    annual_turnover_estimate NVARCHAR(80) NULL,  -- pre-verification AI estimate, kept for side-by-side comparison
     industry              NVARCHAR(200)  NULL,
     decision_maker        NVARCHAR(200)  NULL,
     email                 NVARCHAR(200)  NULL,
@@ -139,7 +143,11 @@ BEGIN
     tags_json             NVARCHAR(MAX)  NULL,
     -- Enrichment (AI) — scalar
     team_size             NVARCHAR(50)   NULL,
+    team_size_verified    BIT            NULL,   -- true = confirmed via Verify from Google; NULL/false = AI estimate
+    team_size_estimate    NVARCHAR(50)   NULL,   -- pre-verification AI estimate, kept for side-by-side comparison
     annual_turnover       NVARCHAR(80)   NULL,
+    turnover_verified     BIT            NULL,   -- true = confirmed via Verify from Google; NULL/false = AI estimate
+    annual_turnover_estimate NVARCHAR(80) NULL,  -- pre-verification AI estimate, kept for side-by-side comparison
     industry              NVARCHAR(200)  NULL,
     decision_maker        NVARCHAR(200)  NULL,
     email                 NVARCHAR(200)  NULL,

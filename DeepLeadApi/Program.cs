@@ -349,7 +349,11 @@ app.MapPut("/api/leads/{kind}/{id:int}/enrichment", async (string kind, int id, 
     await db.ExecuteAsync($"""
         UPDATE {table} SET
           team_size = COALESCE(@TeamSize, team_size),
+          team_size_verified = COALESCE(@TeamSizeVerified, team_size_verified),
+          team_size_estimate = COALESCE(@TeamSizeEstimate, team_size_estimate),
           annual_turnover = COALESCE(@AnnualTurnover, annual_turnover),
+          turnover_verified = COALESCE(@TurnoverVerified, turnover_verified),
+          annual_turnover_estimate = COALESCE(@AnnualTurnoverEstimate, annual_turnover_estimate),
           industry = COALESCE(@Industry, industry),
           decision_maker = COALESCE(@DecisionMaker, decision_maker),
           email = COALESCE(@Email, email),
@@ -377,6 +381,8 @@ app.MapPut("/api/leads/{kind}/{id:int}/enrichment", async (string kind, int id, 
         Instagram = Trunc(body.Instagram, 500), Twitter = Trunc(body.Twitter, 500),
         Youtube = Trunc(body.Youtube, 500), Whatsapp = Trunc(body.Whatsapp, 200),
         body.EnrichmentJson, body.Confidence,
+        body.TeamSizeVerified, TeamSizeEstimate = Trunc(body.TeamSizeEstimate, 50),
+        body.TurnoverVerified, AnnualTurnoverEstimate = Trunc(body.AnnualTurnoverEstimate, 80),
     });
     return Results.Ok(new { ok = true });
 });
@@ -661,7 +667,8 @@ record EnrichmentIn(
     string? TeamSize, string? AnnualTurnover, string? Industry, string? DecisionMaker, string? Email,
     string? AlternatePhone, int? YearFounded, string? CompanyType, string? EmployeeCount, string? Headquarters,
     string? LinkedIn, string? Facebook, string? Instagram, string? Twitter, string? Youtube, string? Whatsapp,
-    string? EnrichmentJson, decimal? Confidence);
+    string? EnrichmentJson, decimal? Confidence,
+    bool? TeamSizeVerified, string? TeamSizeEstimate, bool? TurnoverVerified, string? AnnualTurnoverEstimate);
 
 record ValidationIn(string? ValidationStatus, int? IcpScore, string? IcpStatus, string? IcpReason, string? ScoreBreakdownJson);
 record ValidationItem(int Id, string? ValidationStatus, int? IcpScore, string? IcpStatus, string? IcpReason, string? ScoreBreakdownJson);

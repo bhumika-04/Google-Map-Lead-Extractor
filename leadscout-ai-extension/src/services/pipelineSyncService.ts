@@ -107,6 +107,8 @@ export async function saveEnrichmentToSql(kind: LeadKind, leadMssqlId: number, l
     instagram: l.instagram ?? null, twitter: l.twitter ?? null, youtube: l.youtube ?? null, whatsapp: l.whatsapp ?? null,
     enrichmentJson: l.enrichment ? JSON.stringify(l.enrichment) : null,
     confidence: l.enrichmentConfidence ?? null,
+    teamSizeVerified: l.teamSizeVerified ?? null, teamSizeEstimate: l.teamSizeEstimate ?? null,
+    turnoverVerified: l.turnoverVerified ?? null, annualTurnoverEstimate: l.annualTurnoverEstimate ?? null,
   })
 }
 
