@@ -14,9 +14,12 @@ import { enqueueLiScrape } from './linkedinScraperService'
 import { aggregateCompanyResearch, mapToLegacyResearchResult, mergeSourcePages } from './companyResearchAggregator'
 import { syncDerivedLeads } from './derivedLeadsService'
 import { mirrorResearchToScraped } from './scrapedReconcileService'
+import { runDeepResearch } from './deepResearchService'
+import { db } from '@/db/db'
 import type { SearchEvidence, SourcePage } from '@/types/searchEvidence'
 import type { FlatExtractedData } from './evidenceExtractor'
 import type { Lead } from '@/types/lead'
+import type { ResearchResult } from '@/types/research'
 import { nowISO } from '@/utils/date'
 
 export interface ResearchServiceConfig {
@@ -367,7 +370,7 @@ export async function processNextJob(config: ResearchServiceConfig): Promise<boo
     )
 
     console.log(`${tag} 💾 Step 5: Saving research result | confidence: ${((merged.confidence ?? 0) * 100).toFixed(0)}%`)
-    await researchResultRepository.create(resultData)
+    const resultId = await researchResultRepository.create(resultData)
 
     await researchJobRepository.updateStatus(job.id, 'completed', {
       completedAt: nowISO(),
@@ -378,6 +381,31 @@ export async function processNextJob(config: ResearchServiceConfig): Promise<boo
     syncDerivedLeads().catch(() => {})   // refresh the researched-leads table
     // Mirror the research result into the new scraped_leads (local + new MSSQL).
     mirrorResearchToScraped(lead, resultData as unknown as ResearchResult).catch(() => {})
+
+    // 5b. Deep Research (social intel — LinkedIn/Twitter/Instagram activity,
+    // intent signals, a ready-to-send pitch) runs automatically right after
+    // core research instead of needing a separate manual "Run Deep Research"
+    // click per lead. Best-effort: core research above is already saved, so a
+    // failure here must never fail the job or revert the lead's status.
+    // Always uses the OpenAI key specifically (deepResearchService.ts's
+    // prompt call is OpenAI-only) regardless of which provider is configured
+    // as the main research provider.
+    if (config.openAiApiKey.trim()) {
+      console.log(`${tag} 📡 Step 5b: Deep research (social intelligence)...`)
+      try {
+        const fullResult: ResearchResult = { ...resultData, id: resultId, createdAt: nowISO() }
+        const dr = await runDeepResearch(
+          fullResult, lead, config.openAiApiKey, config.openAiModel || 'gpt-4o-mini',
+          (msg) => console.log(`${tag} 📡 ${msg}`),
+        )
+        await db.deepResearch.add(dr)
+        console.log(`${tag} ✅ Deep research complete`)
+      } catch (err: any) {
+        console.warn(`${tag} ⚠️ Deep research failed (core research already saved): ${err?.message}`)
+      }
+    } else {
+      console.log(`${tag} ⏭ Skipping deep research — no OpenAI key configured`)
+    }
 
     // 6b. Queue the LinkedIn deep-scrape (6-month company posts + every core
     // member's activity) when a company LinkedIn URL was discovered. The

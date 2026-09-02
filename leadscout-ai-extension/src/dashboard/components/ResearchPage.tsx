@@ -273,17 +273,16 @@ function ResultDetail({ result }: { result: EnrichedResult }) {
     setDeepError(null)
     setDeepProgress('Starting deep research…')
     try {
-      // Pick API key + model from the active provider in settings
-      const { researchProvider, openAiApiKey, openAiModel, geminiApiKey, geminiModel, anthropicApiKey, anthropicModel } = settings
-      let apiKey = ''
-      let model  = ''
-      if (researchProvider === 'gemini')    { apiKey = geminiApiKey;    model = geminiModel }
-      else if (researchProvider === 'openai') { apiKey = openAiApiKey;   model = openAiModel }
-      else                                    { apiKey = anthropicApiKey; model = anthropicModel }
-      if (!apiKey) throw new Error(`${researchProvider} API key not set — go to Settings → AI Research`)
+      // Always OpenAI specifically — deepResearchService.ts's prompt call is
+      // OpenAI-only, regardless of which provider is set as the main research
+      // provider (this button's own label says "Uses your OpenAI key").
+      // Previously used whichever provider was primary, which silently sent
+      // a Gemini/Claude key to OpenAI's endpoint for anyone not on OpenAI.
+      const { openAiApiKey, openAiModel } = settings
+      if (!openAiApiKey) throw new Error('OpenAI API key not set — go to Settings → AI Research')
 
       const dr = await runDeepResearch(
-        result, result.lead, apiKey, model,
+        result, result.lead, openAiApiKey, openAiModel || 'gpt-4o-mini',
         (msg) => setDeepProgress(msg),
       )
       const id = await db.deepResearch.add(dr)
