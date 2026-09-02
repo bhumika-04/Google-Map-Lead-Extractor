@@ -21,7 +21,7 @@ function toNewScrapedLead(ol: Lead, sessionId: number): Omit<ScrapedLead, 'id' |
     city: ol.city,
     keyword: ol.keyword,
     country: ol.country,
-    status: mapStatus(ol.status),
+    status: effectiveStatus(ol),
     enrichmentStatus: (ol.teamSize || ol.annualTurnover || ol.industry || ol.decisionMaker) ? 'done' : 'pending',
     researchStatus: 'none',
     teamSize: ol.teamSize,
@@ -52,6 +52,20 @@ function mapStatus(s: Lead['status']): PipelineLeadStatus {
     case 'research_failed':    return 'research_failed'
     default:                   return 'new'
   }
+}
+
+// Some older leads have validationStatus: 'relevant' (icpScore assigned) while
+// their own status field was never promoted to 'selected' — a pre-existing
+// data inconsistency from validation runs under older code, not something
+// mapStatus alone can see. Treat validationStatus as authoritative for any
+// lead whose status otherwise maps to plain 'new', so the mirror reflects
+// what the AI actually decided rather than a stale/never-promoted status.
+function effectiveStatus(ol: Lead): PipelineLeadStatus {
+  const mapped = mapStatus(ol.status)
+  if (mapped !== 'new') return mapped
+  if (ol.validationStatus === 'relevant') return 'selected'
+  if (ol.validationStatus === 'not_relevant') return 'not_relevant'
+  return mapped
 }
 
 export async function reconcileScrapedFromLeads(

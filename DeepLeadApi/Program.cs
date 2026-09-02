@@ -405,26 +405,45 @@ app.MapPost("/api/leads/{kind}/validate-bulk", async (string kind, ValidationBul
 {
     string table;
     try { table = LeadTable(kind); } catch (ArgumentException e) { return Results.BadRequest(new { error = e.Message }); }
+    if (body.Items.Length == 0) return Results.Ok(new { updated = 0 });
+
+    // One set-based UPDATE via OPENJSON instead of N sequential single-row
+    // UPDATEs in a transaction — a session backfill/rebuild can send hundreds
+    // to low thousands of items in one call, and N round trips inside one
+    // transaction was hitting both deadlocks (Error 1205, fixed by this
+    // rewrite removing the multi-statement transaction entirely) and
+    // execution timeouts (Error -2) once N got large. Same pattern as
+    // save-batch above.
+    var itemsJson = JsonSerializer.Serialize(body.Items.Select(v => new
+    {
+        id = v.Id,
+        validationStatus = Trunc(v.ValidationStatus, 20),
+        icpScore = v.IcpScore,
+        icpStatus = Trunc(v.IcpStatus, 30),
+        icpReason = v.IcpReason,
+        scoreBreakdownJson = v.ScoreBreakdownJson,
+    }));
+
+    var sql = $"""
+        UPDATE t SET
+          validation_status = s.validation_status, icp_score = s.icp_score, icp_status = s.icp_status,
+          icp_reason = s.icp_reason, score_breakdown_json = s.score_breakdown_json,
+          validated_at = SYSUTCDATETIME(), updated_at = SYSUTCDATETIME()
+        FROM {table} t
+        JOIN OPENJSON(@ItemsJson) WITH (
+          id                   INT            '$.id',
+          validation_status    NVARCHAR(20)   '$.validationStatus',
+          icp_score            INT            '$.icpScore',
+          icp_status           NVARCHAR(30)   '$.icpStatus',
+          icp_reason           NVARCHAR(MAX)  '$.icpReason',
+          score_breakdown_json NVARCHAR(MAX)  '$.scoreBreakdownJson'
+        ) s ON t.id = s.id;
+        """;
+
     var updated = await WithDeadlockRetry(async () =>
     {
         using var db = Db();
-        await db.OpenAsync();
-        using var tx = db.BeginTransaction();
-        var sql = $"""
-            UPDATE {table} SET validation_status=@ValidationStatus, icp_score=@IcpScore, icp_status=@IcpStatus,
-              icp_reason=@IcpReason, score_breakdown_json=@ScoreBreakdownJson,
-              validated_at=SYSUTCDATETIME(), updated_at=SYSUTCDATETIME() WHERE id=@Id;
-            """;
-        // Always touch rows in ascending id order — two overlapping transactions
-        // that lock the same rows in different orders is exactly what produces a
-        // deadlock (Error 1205) instead of one simply waiting behind the other.
-        foreach (var v in body.Items.OrderBy(v => v.Id))
-            await db.ExecuteAsync(sql, new {
-                v.Id, ValidationStatus = Trunc(v.ValidationStatus, 20), v.IcpScore,
-                IcpStatus = Trunc(v.IcpStatus, 30), v.IcpReason, v.ScoreBreakdownJson,
-            }, tx);
-        tx.Commit();
-        return body.Items.Length;
+        return await db.ExecuteAsync(sql, new { ItemsJson = itemsJson });
     });
     return Results.Ok(new { updated });
 });
