@@ -59,7 +59,11 @@ export interface PipelineLead {
 
   // Enrichment (AI) — scalar
   teamSize?: string
+  teamSizeVerified?: boolean       // true = confirmed via Verify from Google; false/undefined = AI estimate
+  teamSizeEstimate?: string        // pre-verification AI estimate, kept for side-by-side comparison
   annualTurnover?: string
+  turnoverVerified?: boolean       // true = confirmed via Verify from Google; false/undefined = AI estimate
+  annualTurnoverEstimate?: string  // pre-verification AI estimate, kept for side-by-side comparison
   industry?: string
   decisionMaker?: string
   email?: string

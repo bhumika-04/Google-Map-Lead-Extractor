@@ -30,7 +30,7 @@ import type { SelectedLead, ResearchedLead } from '@/types/derivedLeads'
 
 const COUNTRY_NAME: Record<string, string> = Object.fromEntries(COUNTRIES.map((c) => [c.code, c.name]))
 
-type Tab = 'overview' | 'leads' | 'selected' | 'researched'
+type Tab = 'overview' | 'leads' | 'selected' | 'researched' | 'verified'
 
 function computeStats(leads: Lead[]) {
   const isResearch = (s: string) => s.startsWith('research')
@@ -133,6 +133,8 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     r.validationStatus === 'relevant' || r.status === 'selected' || r.status.startsWith('research')
   ), [scraped])
   const researchedScraped = useMemo(() => scraped.filter((r) => r.researchStatus === 'completed'), [scraped])
+  const verifiedScraped = useMemo(() => scraped.filter((r) => r.teamSizeVerified || r.turnoverVerified), [scraped])
+  const verifiedLegacy   = useMemo(() => leads.filter((l) => l.teamSizeVerified || l.turnoverVerified), [leads])
   const s = useMemo(() => (useNew ? computeScrapedStats(scraped) : computeStats(leads)), [useNew, scraped, leads])
 
   function exit() {
@@ -254,6 +256,32 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     toast.success(`${ids.length} lead(s) removed from Selected`)
   }
 
+  // Research is queued off the legacy `leads` table (addToResearchQueue needs
+  // a full Lead row), so for the scraped-mirror path each checked row has to
+  // be matched back to its legacy lead first — same priority used everywhere
+  // else in this file: googleMapsUrl -> phone -> normalizedName+city.
+  async function queueSelectedForResearch() {
+    if (selSelectedIds.size === 0) return
+    const scrapedById = new Map(scraped.map((r) => [r.id!, r]))
+    const byUrl      = new Map(leads.filter((l) => l.googleMapsUrl).map((l) => [l.googleMapsUrl!, l]))
+    const byPhone    = new Map(leads.filter((l) => l.phone).map((l) => [l.phone!, l]))
+    const byNameCity = new Map(leads.map((l) => [`${l.normalizedName}|${l.city ?? ''}`, l]))
+    const findLegacy = (r: ScrapedLead): Lead | undefined =>
+      (r.googleMapsUrl && byUrl.get(r.googleMapsUrl)) ||
+      (r.phone && byPhone.get(r.phone)) ||
+      byNameCity.get(`${r.normalizedName}|${r.city ?? ''}`)
+
+    let queued = 0
+    for (const id of selSelectedIds) {
+      const legacyLead = useNew ? (() => { const sr = scrapedById.get(id); return sr ? findLegacy(sr) : undefined })() : leads.find((l) => l.id === id)
+      if (!legacyLead || legacyLead.status.startsWith('research')) continue
+      try { await addToResearchQueue(legacyLead); queued++ } catch { /* already queued */ }
+    }
+    if (queued > 0) chrome.runtime.sendMessage({ type: MSG.TRIGGER_RESEARCH }).catch(() => {})
+    setSelSelectedIds(new Set())
+    toast.success(queued > 0 ? `${queued} lead(s) queued for research` : 'Selected leads are already queued/researched')
+  }
+
   async function queueRelevantForResearch() {
     if (queuing) return
     const toQueue = leads.filter((l) => (l.validationStatus === 'relevant' || l.status === 'selected') && !l.status.startsWith('research'))
@@ -277,11 +305,13 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
 
   const selectedCount   = useNew ? selectedScraped.length : selRows.length
   const researchedCount = useNew ? researchedScraped.length : resRows.length
+  const verifiedCount   = useNew ? verifiedScraped.length : verifiedLegacy.length
   const tabs: [Tab, string][] = [
     ['overview', 'Overview'],
     ['leads', `Leads (${s.captured})`],
     ['selected', `Selected (${selectedCount})`],
     ['researched', `Researched (${researchedCount})`],
+    ['verified', `Verified (${verifiedCount})`],
   ]
 
   return (
@@ -465,6 +495,10 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
           {selSelectedIds.size > 0 && (
             <div className="flex items-center gap-2 bg-blue-950/40 border border-blue-800/40 rounded-xl px-3 py-2">
               <span className="text-xs text-blue-400 font-medium">{selSelectedIds.size} selected</span>
+              <button onClick={queueSelectedForResearch}
+                className="text-xs px-2.5 py-1 bg-purple-900 hover:bg-purple-800 text-purple-200 rounded-lg transition-colors">
+                ⚗ Queue for Research
+              </button>
               <button onClick={removeFromSelected}
                 className="text-xs px-2.5 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded-lg transition-colors">
                 ✕ Remove from Selected
@@ -483,6 +517,9 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
       {tab === 'researched' && (useNew
         ? <ResearchedTable rows={researchedScraped.map(toResearchedRow)} />
         : <ResearchedTable rows={resRows} />)}
+      {tab === 'verified' && (useNew
+        ? <VerifiedTable rows={verifiedScraped.map(toVerifiedRow)} />
+        : <VerifiedTable rows={verifiedLegacy.map(toVerifiedRow)} />)}
     </div>
   )
 }
@@ -579,6 +616,82 @@ function ResearchedTable({ rows }: { rows: ResearchedLead[] }) {
               <td className="px-3 py-2 text-gray-400">{r.industry ?? '—'}</td>
               <td className="px-3 py-2 text-gray-400">{r.annualTurnover ?? '—'}</td>
               <td className="px-3 py-2 text-gray-400">{r.teamSize ?? '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+interface VerifiedRow {
+  id: number
+  companyName: string
+  city?: string
+  phone?: string
+  teamSize?: string
+  teamSizeVerified?: boolean
+  teamSizeEstimate?: string
+  annualTurnover?: string
+  turnoverVerified?: boolean
+  annualTurnoverEstimate?: string
+  updatedAt: string
+}
+
+// Lead and ScrapedLead share these exact field names, so one mapper serves
+// both the legacy and scraped_leads read paths.
+function toVerifiedRow(r: {
+  id?: number; companyName: string; city?: string; phone?: string
+  teamSize?: string; teamSizeVerified?: boolean; teamSizeEstimate?: string
+  annualTurnover?: string; turnoverVerified?: boolean; annualTurnoverEstimate?: string
+  updatedAt: string
+}): VerifiedRow {
+  return {
+    id: r.id!, companyName: r.companyName, city: r.city, phone: r.phone,
+    teamSize: r.teamSize, teamSizeVerified: r.teamSizeVerified, teamSizeEstimate: r.teamSizeEstimate,
+    annualTurnover: r.annualTurnover, turnoverVerified: r.turnoverVerified, annualTurnoverEstimate: r.annualTurnoverEstimate,
+    updatedAt: r.updatedAt,
+  }
+}
+
+function VerifiedField({ value, verified, estimate }: { value?: string; verified?: boolean; estimate?: string }) {
+  if (!value) return <span className="text-gray-700">—</span>
+  return (
+    <div>
+      <span className={verified ? 'text-emerald-400 font-medium' : 'text-gray-300'}>{value}</span>
+      {verified && <span className="ml-1.5 text-[10px] text-emerald-500" title="Confirmed via Verify from Google">✓ verified</span>}
+      {verified && estimate && estimate !== value && (
+        <div className="text-[11px] text-gray-600 line-through" title="Original AI estimate before verification">{estimate}</div>
+      )}
+    </div>
+  )
+}
+
+// Leads that have been through "Verify from Google" — exact turnover/team
+// size confirmed from a real web source, shown next to the original AI
+// estimate it replaced (struck through) so the difference is visible.
+function VerifiedTable({ rows }: { rows: VerifiedRow[] }) {
+  if (rows.length === 0) return <EmptyState label="No verified leads yet — run 'Verify from Google' on this session to confirm exact turnover/team size." />
+  return (
+    <div className="flex-1 overflow-auto rounded-xl border border-gray-800">
+      <table className="w-full text-xs text-left">
+        <thead className="bg-gray-900 sticky top-0 z-10">
+          <tr className="text-gray-500">
+            <th className="px-3 py-2.5 font-medium">Company</th>
+            <th className="px-3 py-2.5 font-medium">City</th>
+            <th className="px-3 py-2.5 font-medium">Phone</th>
+            <th className="px-3 py-2.5 font-medium">Team size</th>
+            <th className="px-3 py-2.5 font-medium">Turnover</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id} className="border-t border-gray-800/60 hover:bg-gray-800/40 transition-colors">
+              <td className="px-3 py-2 text-white font-medium">{r.companyName}</td>
+              <td className="px-3 py-2 text-gray-400">{r.city ?? '—'}</td>
+              <td className="px-3 py-2 text-gray-300">{r.phone ?? '—'}</td>
+              <td className="px-3 py-2"><VerifiedField value={r.teamSize} verified={r.teamSizeVerified} estimate={r.teamSizeEstimate} /></td>
+              <td className="px-3 py-2"><VerifiedField value={r.annualTurnover} verified={r.turnoverVerified} estimate={r.annualTurnoverEstimate} /></td>
             </tr>
           ))}
         </tbody>

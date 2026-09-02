@@ -25,7 +25,11 @@ function toNewScrapedLead(ol: Lead, sessionId: number): Omit<ScrapedLead, 'id' |
     enrichmentStatus: (ol.teamSize || ol.annualTurnover || ol.industry || ol.decisionMaker) ? 'done' : 'pending',
     researchStatus: 'none',
     teamSize: ol.teamSize,
+    teamSizeVerified: ol.teamSizeVerified,
+    teamSizeEstimate: ol.teamSizeEstimate,
     annualTurnover: ol.annualTurnover,
+    turnoverVerified: ol.turnoverVerified,
+    annualTurnoverEstimate: ol.annualTurnoverEstimate,
     industry: ol.industry,
     companyType: ol.companyType,
     decisionMaker: ol.decisionMaker,
@@ -111,12 +115,16 @@ export async function reconcileScrapedFromLeads(
       continue
     }
 
-    const patch: Partial<ScrapedLead> = { status: mapStatus(ol.status) }
+    const patch: Partial<ScrapedLead> = { status: effectiveStatus(ol) }
 
     const enriched = !!(ol.teamSize || ol.annualTurnover || ol.industry || ol.decisionMaker)
     if (enriched) {
       patch.teamSize = ol.teamSize
+      patch.teamSizeVerified = ol.teamSizeVerified
+      patch.teamSizeEstimate = ol.teamSizeEstimate
       patch.annualTurnover = ol.annualTurnover
+      patch.turnoverVerified = ol.turnoverVerified
+      patch.annualTurnoverEstimate = ol.annualTurnoverEstimate
       patch.industry = ol.industry
       patch.companyType = ol.companyType
       patch.decisionMaker = ol.decisionMaker

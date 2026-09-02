@@ -28,8 +28,19 @@ export async function verifyLeadsFromGoogle(
       if (f) {
         const patch: Partial<Lead> = {}
         // Exact values from Google AI mode → mark verified, overwrite estimates.
-        if (f.annualTurnover) { patch.annualTurnover = f.annualTurnover; patch.turnoverVerified = true }
-        if (f.employeeCount)  { patch.teamSize = f.employeeCount; patch.teamSizeVerified = true }
+        // Snapshot the pre-verification estimate (once — first verification only,
+        // so a re-verify doesn't clobber the original estimate with a value that
+        // was itself already verified) so the Verified tab can show both side by side.
+        if (f.annualTurnover) {
+          if (!lead.turnoverVerified && lead.annualTurnover) patch.annualTurnoverEstimate = lead.annualTurnover
+          patch.annualTurnover = f.annualTurnover
+          patch.turnoverVerified = true
+        }
+        if (f.employeeCount) {
+          if (!lead.teamSizeVerified && lead.teamSize) patch.teamSizeEstimate = lead.teamSize
+          patch.teamSize = f.employeeCount
+          patch.teamSizeVerified = true
+        }
         if (f.directors)      patch.decisionMaker = f.directors
         if (f.companyType)    patch.companyType = f.companyType
         if (f.cin)            patch.cin = f.cin

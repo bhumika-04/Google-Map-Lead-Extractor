@@ -41,8 +41,10 @@ export interface Lead {
   // Enrichment fields — populated after AI pre-validation enrichment
   teamSize?: string              // e.g. "10-50", "Upto 10 People"
   teamSizeVerified?: boolean     // true = found in real web source; false/undefined = estimated
+  teamSizeEstimate?: string      // the pre-verification AI estimate, kept for side-by-side comparison
   annualTurnover?: string        // e.g. "₹40 Lakh" or "₹1-10 Cr (est)"
   turnoverVerified?: boolean     // true = found in real web source; false/undefined = estimated
+  annualTurnoverEstimate?: string // the pre-verification AI estimate, kept for side-by-side comparison
   industry?: string              // e.g. "Label Printing"
   companyType?: string           // e.g. "Pvt Ltd"
   decisionMaker?: string         // owner/director names
