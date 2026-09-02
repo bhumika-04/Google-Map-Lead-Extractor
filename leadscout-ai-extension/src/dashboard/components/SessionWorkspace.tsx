@@ -73,6 +73,7 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
   const [editingProfile, setEditingProfile] = useState(false)
   const [profileDraft, setProfileDraft] = useState('')
   const [showFullProfile, setShowFullProfile] = useState(false)
+  const [selSelectedIds, setSelSelectedIds] = useState<Set<number>>(new Set())
 
   // Scope every lead view to this session while the workspace is open.
   useEffect(() => {
@@ -160,8 +161,12 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
   }
 
   function exportSelected() {
+    // Only the checked rows when something's checked, otherwise every selected lead.
+    const checkedOnly = selSelectedIds.size > 0
+    const scrapedSrc = checkedOnly ? selectedScraped.filter((r) => selSelectedIds.has(r.id!)) : selectedScraped
+    const legacySrc  = checkedOnly ? selRows.filter((r) => selSelectedIds.has(r.leadId)) : selRows
     const rows: ExportRowInput[] = useNew
-      ? selectedScraped.map((r) => ({
+      ? scrapedSrc.map((r) => ({
           companyName: r.companyName,
           city: r.city,
           phone: r.phone,
@@ -179,7 +184,7 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
           companyType: r.companyType,
           creationDate: r.capturedAt,
         }))
-      : selRows.map((r) => ({
+      : legacySrc.map((r) => ({
           companyName: r.companyName,
           city: r.city,
           phone: r.phone,
@@ -194,6 +199,30 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     exportRowsToCSV(rows, exportFileName(`${project?.name ?? 'session'}-selected`))
     activityLogRepository.log('export_completed', `Exported ${rows.length} selected leads (${project?.name ?? 'session'})`, projectId).catch(() => {})
     toast.success(`Exported ${rows.length} selected leads`)
+  }
+
+  function toggleSelRow(id: number) {
+    setSelSelectedIds((s) => {
+      const n = new Set(s)
+      if (n.has(id)) n.delete(id); else n.add(id)
+      return n
+    })
+  }
+  function toggleSelAll(ids: number[]) {
+    setSelSelectedIds((s) => (s.size === ids.length ? new Set() : new Set(ids)))
+  }
+
+  async function removeFromSelected() {
+    if (selSelectedIds.size === 0) return
+    if (!await confirmDialog(`Remove ${selSelectedIds.size} lead(s) from Selected? They stay in this session's Leads tab.`, { confirmLabel: 'Remove' })) return
+    const ids = Array.from(selSelectedIds)
+    if (useNew) {
+      await Promise.all(ids.map((id) => scrapedLeadRepo.update(id, { status: 'new' }).catch(() => {})))
+    } else {
+      await Promise.all(ids.map((id) => leadRepository.updateStatus(id, 'new').catch(() => {})))
+    }
+    setSelSelectedIds(new Set())
+    toast.success(`${ids.length} lead(s) removed from Selected`)
   }
 
   async function queueRelevantForResearch() {
@@ -396,9 +425,22 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
               className="shrink-0 text-xs px-3.5 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors"
             >↓ Export CSV</button>
           </div>
+          {selSelectedIds.size > 0 && (
+            <div className="flex items-center gap-2 bg-blue-950/40 border border-blue-800/40 rounded-xl px-3 py-2">
+              <span className="text-xs text-blue-400 font-medium">{selSelectedIds.size} selected</span>
+              <button onClick={removeFromSelected}
+                className="text-xs px-2.5 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded-lg transition-colors">
+                ✕ Remove from Selected
+              </button>
+              <button onClick={() => setSelSelectedIds(new Set())}
+                className="ml-auto text-xs px-2.5 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg transition-colors">
+                Clear
+              </button>
+            </div>
+          )}
           {useNew
-            ? <SelectedTable rows={selectedScraped.map(toSelectedRow)} />
-            : <SelectedTable rows={selRows} />}
+            ? <SelectedTable rows={selectedScraped.map(toSelectedRow)} selectedIds={selSelectedIds} onToggle={toggleSelRow} onToggleAll={toggleSelAll} />
+            : <SelectedTable rows={selRows} selectedIds={selSelectedIds} onToggle={toggleSelRow} onToggleAll={toggleSelAll} />}
         </div>
       )}
       {tab === 'researched' && (useNew
@@ -426,13 +468,23 @@ function IcpBadge({ score }: { score: number }) {
   return <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold ${cls}`}>{score}</span>
 }
 
-function SelectedTable({ rows }: { rows: SelectedLead[] }) {
+function SelectedTable({ rows, selectedIds, onToggle, onToggleAll }: {
+  rows: SelectedLead[]
+  selectedIds: Set<number>
+  onToggle: (id: number) => void
+  onToggleAll: (ids: number[]) => void
+}) {
   if (rows.length === 0) return <EmptyState label="No selected leads in this session yet — validate leads to populate this table." />
+  const ids = rows.map((r) => r.leadId)
+  const allChecked = selectedIds.size > 0 && selectedIds.size === ids.length
   return (
     <div className="flex-1 overflow-auto rounded-xl border border-gray-800">
       <table className="w-full text-xs text-left">
         <thead className="bg-gray-900 sticky top-0 z-10">
           <tr className="text-gray-500">
+            <th className="px-3 py-2.5 font-medium w-8">
+              <input type="checkbox" className="accent-blue-500" checked={allChecked} onChange={() => onToggleAll(ids)} />
+            </th>
             <th className="px-3 py-2.5 font-medium">Company</th>
             <th className="px-3 py-2.5 font-medium w-20">ICP</th>
             <th className="px-3 py-2.5 font-medium">Category</th>
@@ -442,7 +494,10 @@ function SelectedTable({ rows }: { rows: SelectedLead[] }) {
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.leadId} className="border-t border-gray-800/60 hover:bg-gray-800/40 transition-colors">
+            <tr key={r.leadId} className={`border-t border-gray-800/60 hover:bg-gray-800/40 transition-colors ${selectedIds.has(r.leadId) ? 'bg-blue-950/25' : ''}`}>
+              <td className="px-3 py-2">
+                <input type="checkbox" className="accent-blue-500" checked={selectedIds.has(r.leadId)} onChange={() => onToggle(r.leadId)} />
+              </td>
               <td className="px-3 py-2 text-white font-medium">
                 {r.companyName}
                 {r.validationReason && (
