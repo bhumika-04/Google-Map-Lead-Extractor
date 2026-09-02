@@ -8,6 +8,7 @@ import type { ScrapedLead } from '@/types/pipelineLead'
 import { addToResearchQueue } from '@/services/futureResearchService'
 import { syncDerivedLeads } from '@/services/derivedLeadsService'
 import { updateSessionInSql } from '@/services/pipelineSyncService'
+import { reconcileScrapedForLeads } from '@/services/scrapedReconcileService'
 import { useLeadStore } from '@/state/useLeadStore'
 import { toast } from '@/state/useToastStore'
 import { confirmDialog } from '@/state/useConfirmStore'
@@ -201,6 +202,27 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
     toast.success(`Exported ${rows.length} selected leads`)
   }
 
+  const [rebuilding, setRebuilding] = useState(false)
+  // Backfills scraped_leads rows that were never mirrored (e.g. captured before
+  // a matching fix, or collapsed onto the wrong company's row) using data
+  // already sitting in the legacy leads table — no AI calls, purely local sync.
+  // Fixes a session whose Leads-tab count is far above its Overview/Selected
+  // counts because some leads never got a mirror row to record results on.
+  async function rebuildMirror() {
+    if (!project?.newSessionId) { toast.info('This session has no new-schema mirror yet'); return }
+    setRebuilding(true)
+    const before = scraped.length
+    try {
+      await reconcileScrapedForLeads(leads, 'validation')
+      const after = await scrapedLeadRepo.getBySession(project.newSessionId)
+      setScraped(after)
+      const added = after.length - before
+      toast.success(added > 0 ? `Mirror rebuilt — added ${added} missing lead(s), ${after.length} total` : 'Mirror already up to date')
+    } finally {
+      setRebuilding(false)
+    }
+  }
+
   function toggleSelRow(id: number) {
     setSelSelectedIds((s) => {
       const n = new Set(s)
@@ -339,6 +361,14 @@ export default function SessionWorkspace({ projectId, onExit }: { projectId: num
               className="text-xs px-3 py-1.5 rounded-lg bg-violet-900/40 hover:bg-violet-900/70 text-violet-300 border border-violet-800/50 font-medium transition-colors"
               title="Re-queue relevant leads for deep research only"
             >Research</button>
+            {useNew && leads.length > scraped.length && (
+              <button
+                onClick={rebuildMirror}
+                disabled={rebuilding}
+                className="text-xs px-3 py-1.5 rounded-lg bg-amber-900/40 hover:bg-amber-900/70 disabled:opacity-50 text-amber-300 border border-amber-800/50 font-medium transition-colors"
+                title={`This session has ${leads.length} leads but only ${scraped.length} show up in Overview/Selected — rebuild the mirror to fix it (no AI calls)`}
+              >{rebuilding ? 'Rebuilding…' : `Rebuild mirror (${leads.length - scraped.length} missing)`}</button>
+            )}
           </div>
           <div className="flex items-center gap-2.5 flex-wrap">
             <button onClick={() => setTab('leads')} className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg border border-gray-700 font-medium transition-colors">View all leads</button>

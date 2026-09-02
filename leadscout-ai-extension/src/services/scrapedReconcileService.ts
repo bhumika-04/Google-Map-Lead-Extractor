@@ -6,6 +6,37 @@ import type { Lead } from '@/types/lead'
 import type { ResearchResult } from '@/types/research'
 import type { ScrapedLead, PipelineLeadStatus } from '@/types/pipelineLead'
 
+function toNewScrapedLead(ol: Lead, sessionId: number): Omit<ScrapedLead, 'id' | 'capturedAt' | 'updatedAt'> & { capturedAt?: string } {
+  return {
+    sessionId,
+    companyName: ol.companyName,
+    normalizedName: ol.normalizedName,
+    category: ol.category,
+    rating: ol.rating,
+    reviewCount: ol.reviewCount,
+    address: ol.address,
+    phone: ol.phone,
+    website: ol.website,
+    googleMapsUrl: ol.googleMapsUrl,
+    city: ol.city,
+    keyword: ol.keyword,
+    country: ol.country,
+    status: mapStatus(ol.status),
+    enrichmentStatus: (ol.teamSize || ol.annualTurnover || ol.industry || ol.decisionMaker) ? 'done' : 'pending',
+    researchStatus: 'none',
+    teamSize: ol.teamSize,
+    annualTurnover: ol.annualTurnover,
+    industry: ol.industry,
+    companyType: ol.companyType,
+    decisionMaker: ol.decisionMaker,
+    validationStatus: ol.validationStatus === 'relevant' || ol.validationStatus === 'not_relevant' ? ol.validationStatus : undefined,
+    icpScore: ol.icpScore,
+    icpStatus: ol.icpStatus,
+    icpReason: ol.icpReason,
+    capturedAt: ol.capturedAt,
+  }
+}
+
 // Mirror the pipeline fields the proven (legacy) path writes onto old `leads`
 // into the new `scraped_leads` rows — locally AND to the new MSSQL — so the
 // redesigned schema reflects enrichment + validation, not just capture.
@@ -53,7 +84,18 @@ export async function reconcileScrapedFromLeads(
 
   for (const ol of oldLeads) {
     const sl = findMatch(ol)
-    if (!sl?.id) continue
+    if (!sl?.id) {
+      // No scraped_leads row exists at all for this legacy lead — it was
+      // captured before city-aware matching was fixed and got silently
+      // collapsed onto a different company's row instead of getting its own
+      // (or never mirrored for some other reason). Create it now from the
+      // legacy lead's own data so its validation/enrichment results, already
+      // sitting correctly in the legacy table, finally have a mirror row to
+      // land on — this is what backfills a session's undercounted
+      // Scored/Relevant/Selected tiles without re-running the AI on anything.
+      await scrapedLeadRepo.create(toNewScrapedLead(ol, sid)).catch(() => {})
+      continue
+    }
 
     const patch: Partial<ScrapedLead> = { status: mapStatus(ol.status) }
 
